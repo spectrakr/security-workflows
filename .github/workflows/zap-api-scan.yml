@@ -1,0 +1,282 @@
+# .github/workflows/zap-api-scan.yml
+# OWASP ZAP API Scan - REST/GraphQL API 전용 스캔
+# 토픽 "auto-zap-api"가 있는 저장소에만 실행됨
+
+name: Reusable ZAP API Scan
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'API base URL (e.g., http://localhost:3000/api)'
+        required: true
+        type: string
+      app_start_command:
+        description: 'Command to start the API server'
+        required: true
+        type: string
+      app_port:
+        description: 'Port where API runs (default: 3000)'
+        required: false
+        type: string
+        default: '3000'
+      api_spec_url:
+        description: 'OpenAPI/Swagger spec URL (e.g., http://localhost:3000/api-docs/swagger.json)'
+        required: false
+        type: string
+        default: ''
+      api_format:
+        description: 'API format: openapi, soap, graphql (default: openapi)'
+        required: false
+        type: string
+        default: 'openapi'
+      rules_file:
+        description: 'Custom ZAP rules file path (optional)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  # 1단계: auto-zap-api 토픽 확인
+  check-topic:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    
+    steps:
+      - name: Check for auto-zap-api topic
+        id: check
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const repo = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const topics = repo.data.topics || [];
+            
+            if (topics.includes('auto-zap-api')) {
+              core.setOutput('enabled', 'true');
+              console.log('✅ ZAP API scan enabled (auto-zap-api topic found)');
+            } else {
+              core.setOutput('enabled', 'false');
+              console.log('⏭️ ZAP API scan disabled (no auto-zap-api topic)');
+            }
+
+  # 2단계: ZAP API 스캔 실행 (토픽 있을 때만)
+  zap-api:
+    needs: check-topic
+    if: needs.check-topic.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # API 서버 실행 (백그라운드)
+      - name: Start API server
+        run: |
+          echo "Starting API server with: ${{ inputs.app_start_command }}"
+          ${{ inputs.app_start_command }} &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+          
+          # API가 준비될 때까지 대기
+          echo "Waiting for API to be ready on port ${{ inputs.app_port }}..."
+          for i in {1..30}; do
+            if curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+              echo "✅ API is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          
+          # 최종 확인
+          if ! curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+            echo "❌ API failed to start"
+            exit 1
+          fi
+      
+      # OpenAPI 스펙 다운로드 (제공된 경우)
+      - name: Download API Specification
+        if: inputs.api_spec_url != ''
+        run: |
+          echo "Downloading API spec from: ${{ inputs.api_spec_url }}"
+          curl -o api-spec.json ${{ inputs.api_spec_url }}
+          
+          # 검증
+          if [ ! -f api-spec.json ]; then
+            echo "❌ Failed to download API spec"
+            exit 1
+          fi
+          
+          echo "✅ API spec downloaded successfully"
+          ls -lh api-spec.json
+      
+      # ZAP API Scan 실행
+      - name: Run ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.4.0
+        with:
+          target: ${{ inputs.api_spec_url != '' && 'api-spec.json' || inputs.target_url }}
+          format: ${{ inputs.api_format }}
+          rules_file_name: ${{ inputs.rules_file }}
+          cmd_options: '-a'
+          allow_issue_writing: false
+          fail_action: false
+      
+      # 스캔 결과 업로드
+      - name: Upload ZAP API Scan Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: zap-api-report
+          path: |
+            report_html.html
+            report_json.json
+            report_md.md
+          retention-days: 30
+      
+      # API 서버 종료
+      - name: Stop API server
+        if: always()
+        run: |
+          if [ ! -z "${{ env.APP_PID }}" ]; then
+            kill ${{ env.APP_PID }} || true
+          fi
+      
+      # PR에 결과 코멘트
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            let criticalCount = 0;
+            let highCount = 0;
+            let mediumCount = 0;
+            let lowCount = 0;
+            let endpoints = 0;
+            
+            // JSON 리포트 파싱
+            if (fs.existsSync('report_json.json')) {
+              try {
+                const report = JSON.parse(fs.readFileSync('report_json.json', 'utf8'));
+                const alerts = report.site?.[0]?.alerts || [];
+                
+                alerts.forEach(alert => {
+                  const risk = alert.riskdesc || '';
+                  if (risk.includes('Critical')) criticalCount++;
+                  else if (risk.includes('High')) highCount++;
+                  else if (risk.includes('Medium')) mediumCount++;
+                  else if (risk.includes('Low')) lowCount++;
+                });
+                
+                // 엔드포인트 수 계산
+                const urls = report.site?.[0]?.urls || [];
+                endpoints = urls.length;
+              } catch (e) {
+                console.log('Error parsing JSON report:', e);
+              }
+            }
+            
+            const totalAlerts = criticalCount + highCount + mediumCount + lowCount;
+            
+            const comment = `## 🔌 OWASP ZAP API Scan Results
+            
+            **Scan Type:** API Security Scan (${{ inputs.api_format }})
+            **Target:** ${{ inputs.target_url }}
+            **Endpoints Tested:** ${endpoints}
+            
+            ### 📊 Findings Summary
+            
+            | Severity | Count |
+            |----------|-------|
+            | 🔴 CRITICAL | ${criticalCount} |
+            | 🟠 HIGH | ${highCount} |
+            | 🟡 MEDIUM | ${mediumCount} |
+            | 🔵 LOW | ${lowCount} |
+            | **Total** | **${totalAlerts}** |
+            
+            ### 📋 Next Steps
+            
+            1. **Download** the full reports from Artifacts
+            2. **Review** API-specific vulnerabilities:
+               - Authentication/Authorization bypass
+               - Broken Object Level Authorization (BOLA)
+               - Excessive data exposure
+               - Mass assignment
+               - SQL/NoSQL injection
+               - Rate limiting issues
+            3. **Fix** critical issues before deployment
+            4. **Retest** after implementing fixes
+            
+            ### 🔍 Common API Vulnerabilities
+            
+            **OWASP API Security Top 10:**
+            - Broken Object Level Authorization
+            - Broken User Authentication
+            - Excessive Data Exposure
+            - Lack of Resources & Rate Limiting
+            - Broken Function Level Authorization
+            - Mass Assignment
+            - Security Misconfiguration
+            - Injection
+            - Improper Assets Management
+            - Insufficient Logging & Monitoring
+            
+            ### 💡 API Security Best Practices
+            
+            ✅ **Authentication:**
+            - Use OAuth 2.0 or JWT tokens
+            - Implement token expiration
+            - Never expose API keys in URLs
+            
+            ✅ **Authorization:**
+            - Validate user permissions on every endpoint
+            - Implement proper RBAC (Role-Based Access Control)
+            - Check object ownership before allowing access
+            
+            ✅ **Input Validation:**
+            - Validate all input data
+            - Use allow-lists, not deny-lists
+            - Sanitize data before processing
+            
+            ✅ **Rate Limiting:**
+            - Implement rate limiting per user/IP
+            - Protect against brute force attacks
+            - Set appropriate throttling thresholds
+            
+            ✅ **Data Protection:**
+            - Return only necessary data
+            - Don't expose internal IDs
+            - Use HTTPS for all endpoints
+            
+            **📊 Full Reports:** Download from Actions Artifacts (available for 30 days)`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+  
+  # 3단계: 비활성화 알림
+  notify-disabled:
+    needs: check-topic
+    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify that scan is disabled
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'ℹ️ OWASP ZAP API scan is not enabled for this repository.\n\nTo enable: Add `auto-zap-api` topic in repository Settings.'
+            });
