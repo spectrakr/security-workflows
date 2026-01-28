@@ -1,0 +1,184 @@
+# .github/workflows/zap-baseline-scan.yml
+# OWASP ZAP Baseline Scan - 수동적 스캔 (안전, 빠름)
+# 토픽 "auto-zap-baseline"이 있는 저장소에만 실행됨
+
+name: Reusable ZAP Baseline Scan
+
+on:
+  workflow_call:
+    inputs:
+      target_url:
+        description: 'Target URL to scan (e.g., http://localhost:3000)'
+        required: true
+        type: string
+      app_start_command:
+        description: 'Command to start the app (e.g., npm start, docker-compose up)'
+        required: true
+        type: string
+      app_port:
+        description: 'Port where app runs (default: 3000)'
+        required: false
+        type: string
+        default: '3000'
+      rules_file:
+        description: 'Custom ZAP rules file path (optional)'
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  # 1단계: auto-zap-baseline 토픽 확인
+  check-topic:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    
+    steps:
+      - name: Check for auto-zap-baseline topic
+        id: check
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const repo = await github.rest.repos.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+            
+            const topics = repo.data.topics || [];
+            
+            if (topics.includes('auto-zap-baseline')) {
+              core.setOutput('enabled', 'true');
+              console.log('✅ ZAP Baseline scan enabled (auto-zap-baseline topic found)');
+            } else {
+              core.setOutput('enabled', 'false');
+              console.log('⏭️ ZAP Baseline scan disabled (no auto-zap-baseline topic)');
+            }
+
+  # 2단계: ZAP Baseline 스캔 실행 (토픽 있을 때만)
+  zap-baseline:
+    needs: check-topic
+    if: needs.check-topic.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # 앱 실행 (백그라운드)
+      - name: Start application
+        run: |
+          echo "Starting application with: ${{ inputs.app_start_command }}"
+          ${{ inputs.app_start_command }} &
+          APP_PID=$!
+          echo "APP_PID=$APP_PID" >> $GITHUB_ENV
+          
+          # 앱이 준비될 때까지 대기
+          echo "Waiting for app to be ready on port ${{ inputs.app_port }}..."
+          for i in {1..30}; do
+            if curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+              echo "✅ App is ready!"
+              break
+            fi
+            echo "Waiting... ($i/30)"
+            sleep 2
+          done
+          
+          # 최종 확인
+          if ! curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+            echo "❌ App failed to start"
+            exit 1
+          fi
+      
+      # ZAP Baseline Scan 실행
+      - name: Run ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.7.0
+        with:
+          target: ${{ inputs.target_url }}
+          rules_file_name: ${{ inputs.rules_file }}
+          cmd_options: '-a'
+          allow_issue_writing: false
+          fail_action: false
+      
+      # 스캔 결과 업로드
+      - name: Upload ZAP Scan Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: zap-baseline-report
+          path: report_html.html
+          retention-days: 30
+      
+      # 앱 종료
+      - name: Stop application
+        if: always()
+        run: |
+          if [ ! -z "${{ env.APP_PID }}" ]; then
+            kill ${{ env.APP_PID }} || true
+          fi
+      
+      # PR에 결과 코멘트
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            let alertCount = 0;
+            let highAlerts = 0;
+            let mediumAlerts = 0;
+            
+            // report_md.md 파일이 있으면 파싱
+            if (fs.existsSync('report_md.md')) {
+              const report = fs.readFileSync('report_md.md', 'utf8');
+              // 간단한 파싱 (실제로는 더 정교하게)
+              alertCount = (report.match(/##/g) || []).length;
+            }
+            
+            const comment = `## 🔍 OWASP ZAP Baseline Scan Results
+            
+            **Scan Type:** Baseline (Passive)
+            **Target:** ${{ inputs.target_url }}
+            **Alerts Found:** ${alertCount}
+            
+            📋 **Next Steps:**
+            1. Download the full HTML report from Artifacts
+            2. Review all findings
+            3. Fix HIGH and MEDIUM severity issues
+            4. Consider false positives
+            
+            **📊 Report:**
+            - HTML Report available in Actions Artifacts (30 days)
+            - Review detailed findings and remediation steps
+            
+            **ℹ️ Note:** Baseline scan is passive and safe - no attacks performed.
+            
+            **🔍 Common Issues:**
+            - Missing security headers (X-Frame-Options, CSP)
+            - Cookie security flags (Secure, HttpOnly)
+            - Information disclosure in error pages
+            - Outdated JavaScript libraries (check with Trivy too!)`;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+  
+  # 3단계: 비활성화 알림
+  notify-disabled:
+    needs: check-topic
+    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify that scan is disabled
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'ℹ️ OWASP ZAP Baseline scan is not enabled for this repository.\n\nTo enable: Add `auto-zap-baseline` topic in repository Settings.'
+            });
