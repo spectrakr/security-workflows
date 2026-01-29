@@ -150,7 +150,7 @@ jobs:
             report_html.html
             report_md.md
             report_json.json
-          retention-days: 30
+          retention-days: 7
       
       # 애플리케이션 종료
       - name: Stop application
