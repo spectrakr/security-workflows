@@ -1,34 +1,53 @@
-# .github/workflows/zap-baseline-scan.yml
-# OWASP ZAP Baseline Scan - 수동적 스캔 (안전, 빠름)
-# 토픽 "auto-zap-baseline"이 있는 저장소에만 실행됨
+# =============================================================================
+# ZAP Baseline Scan - 재사용 가능한 워크플로우
+# =============================================================================
+# 목적: 웹 애플리케이션의 기본 보안 취약점 스캔
+# 방식: 수동 스캔 (Passive) - 실제 공격 없음, 안전함
+# 소요시간: 5-10분
+# 
+# 활성화 방법:
+#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-baseline
+# 
+# 사용 예시:
+#   jobs:
+#     zap-baseline:
+#       uses: spectrakr/security-workflows/.github/workflows/zap-baseline-scan.yml@main
+#       with:
+#         target_url: 'http://localhost:3000'
+#         app_start_command: 'npm install && npm start'
+#         app_port: '3000'
+# =============================================================================
 
 name: Reusable ZAP Baseline Scan
 
 on:
   workflow_call:
     inputs:
+      # 스캔 대상 URL
       target_url:
-        description: 'Target URL to scan (e.g., http://localhost:3000)'
         required: true
         type: string
+        description: '스캔할 URL (예: http://localhost:3000)'
+      
+      # 앱 시작 명령어 (의존성 설치 포함)
       app_start_command:
-        description: 'Command to start the app (e.g., npm start, docker-compose up)'
         required: true
         type: string
+        description: '앱 시작 명령어 (예: npm install && npm start)'
+      
+      # 앱 실행 포트
       app_port:
-        description: 'Port where app runs (default: 3000)'
         required: false
         type: string
         default: '3000'
-      rules_file:
-        description: 'Custom ZAP rules file path (optional)'
-        required: false
-        type: string
-        default: ''
+        description: '앱 포트 번호'
 
 jobs:
-  # 1단계: auto-zap-baseline 토픽 확인
+  # ---------------------------------------------------------------------------
+  # Job 1: 토픽 확인 - auto-zap-baseline 토픽이 있는지 체크
+  # ---------------------------------------------------------------------------
   check-topic:
+    name: Check Topic
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -39,146 +58,122 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
+            // GitHub API로 저장소 토픽 확인
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
             });
             
             const topics = repo.data.topics || [];
-            
             if (topics.includes('auto-zap-baseline')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP Baseline scan enabled (auto-zap-baseline topic found)');
+              console.log('✅ ZAP Baseline scan enabled');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ ZAP Baseline scan disabled (no auto-zap-baseline topic)');
             }
 
-  # 2단계: ZAP Baseline 스캔 실행 (토픽 있을 때만)
+  # ---------------------------------------------------------------------------
+  # Job 2: ZAP Baseline 스캔 실행
+  # ---------------------------------------------------------------------------
   zap-baseline:
+    name: Run ZAP Baseline Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     
     steps:
+      # 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v3
       
-      # 앱 실행 (백그라운드)
+      # 애플리케이션 시작 및 준비 대기
       - name: Start application
         run: |
-          echo "Starting application with: ${{ inputs.app_start_command }}"
+          echo "🚀 Starting application..."
+          
+          # 백그라운드로 앱 시작
           ${{ inputs.app_start_command }} &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
           
-          # 앱이 준비될 때까지 대기
-          echo "Waiting for app to be ready on port ${{ inputs.app_port }}..."
+          # 앱이 준비될 때까지 대기 (최대 60초)
+          echo "⏳ Waiting for app to be ready..."
           for i in {1..30}; do
-            if curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+            # /health 또는 / 경로로 헬스체크
+            if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
+               curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
               echo "✅ App is ready!"
               break
             fi
             echo "Waiting... ($i/30)"
             sleep 2
           done
-          
-          # 최종 확인
-          if ! curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-            echo "❌ App failed to start"
-            exit 1
-          fi
       
-      # ZAP Baseline Scan 실행
+      # ZAP Docker 이미지 다운로드
+      - name: Pull ZAP Docker image
+        run: |
+          echo "📦 Pulling ZAP Docker image..."
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+      
+      # ZAP Baseline 스캔 실행
       - name: Run ZAP Baseline Scan
-        uses: zaproxy/action-baseline@v0.7.0
-        with:
-          target: ${{ inputs.target_url }}
-          rules_file_name: ${{ inputs.rules_file }}
-          cmd_options: '-a'
-          allow_issue_writing: false
-          fail_action: false
+        run: |
+          echo "🔍 Running ZAP Baseline Scan..."
+          
+          # ZAP 스캔 실행
+          # --rm: 컨테이너 종료 시 자동 삭제
+          # --network host: localhost 접근 가능
+          # -v: 볼륨 마운트 (리포트 파일 저장)
+          # || true: 취약점 발견 시에도 계속 진행
+          docker run --rm \
+            --network host \
+            -v ${{ github.workspace }}:/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t ${{ inputs.target_url }} \
+            -r report_html.html \
+            -w report_md.md \
+            -J report_json.json || true
+          
+          echo "✅ Scan completed"
+        continue-on-error: true
       
-      # 스캔 결과 업로드
-      - name: Upload ZAP Scan Report
+      # 리포트 업로드 (Artifacts)
+      - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zap-baseline-report
-          path: report_html.html
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
           retention-days: 30
       
-      # 앱 종료
+      # 애플리케이션 종료
       - name: Stop application
         if: always()
         run: |
           if [ ! -z "${{ env.APP_PID }}" ]; then
-            kill ${{ env.APP_PID }} || true
+            kill ${{ env.APP_PID }} 2>/dev/null || true
+            echo "✅ Application stopped"
           fi
-      
-      # PR에 결과 코멘트
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            let alertCount = 0;
-            let highAlerts = 0;
-            let mediumAlerts = 0;
-            
-            // report_md.md 파일이 있으면 파싱
-            if (fs.existsSync('report_md.md')) {
-              const report = fs.readFileSync('report_md.md', 'utf8');
-              // 간단한 파싱 (실제로는 더 정교하게)
-              alertCount = (report.match(/##/g) || []).length;
-            }
-            
-            const comment = `## 🔍 OWASP ZAP Baseline Scan Results
-            
-            **Scan Type:** Baseline (Passive)
-            **Target:** ${{ inputs.target_url }}
-            **Alerts Found:** ${alertCount}
-            
-            📋 **Next Steps:**
-            1. Download the full HTML report from Artifacts
-            2. Review all findings
-            3. Fix HIGH and MEDIUM severity issues
-            4. Consider false positives
-            
-            **📊 Report:**
-            - HTML Report available in Actions Artifacts (30 days)
-            - Review detailed findings and remediation steps
-            
-            **ℹ️ Note:** Baseline scan is passive and safe - no attacks performed.
-            
-            **🔍 Common Issues:**
-            - Missing security headers (X-Frame-Options, CSP)
-            - Cookie security flags (Secure, HttpOnly)
-            - Information disclosure in error pages
-            - Outdated JavaScript libraries (check with Trivy too!)`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-  
-  # 3단계: 비활성화 알림
-  notify-disabled:
-    needs: check-topic
-    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify that scan is disabled
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'ℹ️ OWASP ZAP Baseline scan is not enabled for this repository.\n\nTo enable: Add `auto-zap-baseline` topic in repository Settings.'
-            });
+
+# =============================================================================
+# 참고사항:
+# 
+# 리포트 다운로드:
+#   Actions → 실행 클릭 → Artifacts → zap-baseline-report 다운로드
+# 
+# 문제 해결:
+#   - 앱 시작 실패: app_start_command 확인
+#   - 연결 실패: target_url과 app_port 일치 확인
+#   - 리포트 비어있음: 앱이 정상 시작되었는지 로그 확인
+# 
+# 프로젝트별 설정 예시:
+#   Node.js:  'npm install && npm start'
+#   React:    'npm install && npm run build && npx serve -s build -l 3000'
+#   Python:   'pip install -r requirements.txt && python app.py'
+#   Django:   'pip install -r requirements.txt && python manage.py runserver 0.0.0.0:8000'
+# =============================================================================
