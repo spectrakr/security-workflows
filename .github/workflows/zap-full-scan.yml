@@ -134,6 +134,7 @@ jobs:
           
           # -m 옵션: 스캔 타임아웃 설정 (분 단위)
           docker run --rm \
+            --user root \
             --network host \
             -v ${{ github.workspace }}:/zap/wrk:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
