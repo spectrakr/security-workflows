@@ -149,6 +149,7 @@ jobs:
           curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.yaml 2>/dev/null || true
           
           docker run --rm \
+            --user root \
             --network host \
             -v ${{ github.workspace }}:/zap/wrk:rw \
             -v /tmp:/tmp:rw \
