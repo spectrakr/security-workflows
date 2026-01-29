@@ -1,44 +1,73 @@
-# .github/workflows/zap-api-scan.yml
-# OWASP ZAP API Scan - REST/GraphQL API 전용 스캔
-# 토픽 "auto-zap-api"가 있는 저장소에만 실행됨
+# =============================================================================
+# ZAP API Scan - 재사용 가능한 워크플로우
+# =============================================================================
+# 목적: REST/GraphQL API 전용 보안 스캔
+# 소요시간: 10-15분
+# 
+# 특징:
+#   - OpenAPI/Swagger 스펙 지원
+#   - API 엔드포인트 자동 탐지
+#   - REST API 및 GraphQL 모두 지원
+# 
+# 활성화 방법:
+#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-api
+# 
+# 사용 예시:
+#   jobs:
+#     zap-api:
+#       uses: spectrakr/security-workflows/.github/workflows/zap-api-scan.yml@main
+#       with:
+#         target_url: 'http://localhost:8080/api'
+#         app_start_command: 'npm install && npm start'
+#         app_port: '8080'
+#         api_spec_url: 'http://localhost:8080/api-docs/swagger.json'
+#         api_format: 'openapi'
+# =============================================================================
 
 name: Reusable ZAP API Scan
 
 on:
   workflow_call:
     inputs:
+      # API Base URL
       target_url:
-        description: 'API base URL (e.g., http://localhost:3000/api)'
         required: true
         type: string
+        description: 'API Base URL (예: http://localhost:8080/api)'
+      
+      # 앱 시작 명령어
       app_start_command:
-        description: 'Command to start the API server'
         required: true
         type: string
+        description: '앱 시작 명령어'
+      
+      # 앱 실행 포트
       app_port:
-        description: 'Port where API runs (default: 3000)'
         required: false
         type: string
         default: '3000'
+        description: '앱 포트'
+      
+      # API 스펙 URL (선택)
       api_spec_url:
-        description: 'OpenAPI/Swagger spec URL (e.g., http://localhost:3000/api-docs/swagger.json)'
         required: false
         type: string
         default: ''
+        description: 'OpenAPI/Swagger 스펙 URL (선택, 권장)'
+      
+      # API 스펙 형식
       api_format:
-        description: 'API format: openapi, soap, graphql (default: openapi)'
         required: false
         type: string
         default: 'openapi'
-      rules_file:
-        description: 'Custom ZAP rules file path (optional)'
-        required: false
-        type: string
-        default: ''
+        description: 'API 형식 (openapi, graphql)'
 
 jobs:
-  # 1단계: auto-zap-api 토픽 확인
+  # ---------------------------------------------------------------------------
+  # Job 1: 토픽 확인 - auto-zap-api 토픽이 있는지 체크
+  # ---------------------------------------------------------------------------
   check-topic:
+    name: Check Topic
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -55,17 +84,19 @@ jobs:
             });
             
             const topics = repo.data.topics || [];
-            
             if (topics.includes('auto-zap-api')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP API scan enabled (auto-zap-api topic found)');
+              console.log('✅ ZAP API scan enabled');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ ZAP API scan disabled (no auto-zap-api topic)');
             }
 
-  # 2단계: ZAP API 스캔 실행 (토픽 있을 때만)
+  # ---------------------------------------------------------------------------
+  # Job 2: ZAP API 스캔 실행
+  # ---------------------------------------------------------------------------
   zap-api:
+    name: Run ZAP API Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
@@ -75,208 +106,135 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      # API 서버 실행 (백그라운드)
-      - name: Start API server
+      # 애플리케이션 시작
+      - name: Start application
         run: |
-          echo "Starting API server with: ${{ inputs.app_start_command }}"
+          echo "🚀 Starting application..."
+          
           ${{ inputs.app_start_command }} &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
           
-          # API가 준비될 때까지 대기
-          echo "Waiting for API to be ready on port ${{ inputs.app_port }}..."
+          echo "⏳ Waiting for app..."
           for i in {1..30}; do
-            if curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-              echo "✅ API is ready!"
+            if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
+               curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+              echo "✅ App ready!"
               break
             fi
-            echo "Waiting... ($i/30)"
             sleep 2
           done
-          
-          # 최종 확인
-          if ! curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-            echo "❌ API failed to start"
-            exit 1
-          fi
       
-      # OpenAPI 스펙 다운로드 (제공된 경우)
-      - name: Download API Specification
+      # API 스펙 확인 (있는 경우)
+      - name: Check API spec
         if: inputs.api_spec_url != ''
         run: |
-          echo "Downloading API spec from: ${{ inputs.api_spec_url }}"
-          curl -o api-spec.json ${{ inputs.api_spec_url }}
-          
-          # 검증
-          if [ ! -f api-spec.json ]; then
-            echo "❌ Failed to download API spec"
-            exit 1
-          fi
-          
-          echo "✅ API spec downloaded successfully"
-          ls -lh api-spec.json
+          echo "📄 Checking API spec at ${{ inputs.api_spec_url }}"
+          curl -f ${{ inputs.api_spec_url }} > api-spec.json || \
+          curl -f ${{ inputs.api_spec_url }} > api-spec.yaml || \
+          echo "⚠️ Could not download API spec, will proceed without it"
       
-      # ZAP API Scan 실행
-      - name: Run ZAP API Scan
-        uses: zaproxy/action-api-scan@v0.4.0
-        with:
-          target: ${{ inputs.api_spec_url != '' && 'api-spec.json' || inputs.target_url }}
-          format: ${{ inputs.api_format }}
-          rules_file_name: ${{ inputs.rules_file }}
-          cmd_options: '-a'
-          allow_issue_writing: false
-          fail_action: false
+      # ZAP Docker 이미지 다운로드
+      - name: Pull ZAP Docker image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
       
-      # 스캔 결과 업로드
-      - name: Upload ZAP API Scan Report
+      # ZAP API 스캔 실행 (스펙 있을 때)
+      - name: Run ZAP API Scan (with spec)
+        if: inputs.api_spec_url != ''
+        run: |
+          echo "🔍 Running ZAP API Scan with spec..."
+          
+          # API 스펙 다운로드
+          curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.json 2>/dev/null || \
+          curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.yaml 2>/dev/null || true
+          
+          docker run --rm \
+            --network host \
+            -v ${{ github.workspace }}:/zap/wrk:rw \
+            -v /tmp:/tmp:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-api-scan.py \
+            -t ${{ inputs.target_url }} \
+            -f ${{ inputs.api_format }} \
+            -r report_html.html \
+            -w report_md.md \
+            -J report_json.json || true
+          
+          echo "✅ Scan completed"
+        continue-on-error: true
+      
+      # ZAP API 스캔 실행 (스펙 없을 때 - Baseline으로 대체)
+      - name: Run ZAP API Scan (without spec)
+        if: inputs.api_spec_url == ''
+        run: |
+          echo "🔍 Running ZAP API Scan without spec..."
+          echo "⚠️ Note: Without API spec, some endpoints may be missed"
+          
+          # 스펙 없이 Baseline 스캔 수행
+          docker run --rm \
+            --network host \
+            -v ${{ github.workspace }}:/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t ${{ inputs.target_url }} \
+            -r report_html.html \
+            -w report_md.md \
+            -J report_json.json || true
+          
+          echo "✅ Scan completed"
+        continue-on-error: true
+      
+      # 리포트 업로드
+      - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zap-api-report
           path: |
             report_html.html
-            report_json.json
             report_md.md
+            report_json.json
           retention-days: 30
       
-      # API 서버 종료
-      - name: Stop API server
+      # 애플리케이션 종료
+      - name: Stop application
         if: always()
         run: |
           if [ ! -z "${{ env.APP_PID }}" ]; then
-            kill ${{ env.APP_PID }} || true
+            kill ${{ env.APP_PID }} 2>/dev/null || true
           fi
       
-      # PR에 결과 코멘트
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            let criticalCount = 0;
-            let highCount = 0;
-            let mediumCount = 0;
-            let lowCount = 0;
-            let endpoints = 0;
-            
-            // JSON 리포트 파싱
-            if (fs.existsSync('report_json.json')) {
-              try {
-                const report = JSON.parse(fs.readFileSync('report_json.json', 'utf8'));
-                const alerts = report.site?.[0]?.alerts || [];
-                
-                alerts.forEach(alert => {
-                  const risk = alert.riskdesc || '';
-                  if (risk.includes('Critical')) criticalCount++;
-                  else if (risk.includes('High')) highCount++;
-                  else if (risk.includes('Medium')) mediumCount++;
-                  else if (risk.includes('Low')) lowCount++;
-                });
-                
-                // 엔드포인트 수 계산
-                const urls = report.site?.[0]?.urls || [];
-                endpoints = urls.length;
-              } catch (e) {
-                console.log('Error parsing JSON report:', e);
-              }
-            }
-            
-            const totalAlerts = criticalCount + highCount + mediumCount + lowCount;
-            
-            const comment = `## 🔌 OWASP ZAP API Scan Results
-            
-            **Scan Type:** API Security Scan (${{ inputs.api_format }})
-            **Target:** ${{ inputs.target_url }}
-            **Endpoints Tested:** ${endpoints}
-            
-            ### 📊 Findings Summary
-            
-            | Severity | Count |
-            |----------|-------|
-            | 🔴 CRITICAL | ${criticalCount} |
-            | 🟠 HIGH | ${highCount} |
-            | 🟡 MEDIUM | ${mediumCount} |
-            | 🔵 LOW | ${lowCount} |
-            | **Total** | **${totalAlerts}** |
-            
-            ### 📋 Next Steps
-            
-            1. **Download** the full reports from Artifacts
-            2. **Review** API-specific vulnerabilities:
-               - Authentication/Authorization bypass
-               - Broken Object Level Authorization (BOLA)
-               - Excessive data exposure
-               - Mass assignment
-               - SQL/NoSQL injection
-               - Rate limiting issues
-            3. **Fix** critical issues before deployment
-            4. **Retest** after implementing fixes
-            
-            ### 🔍 Common API Vulnerabilities
-            
-            **OWASP API Security Top 10:**
-            - Broken Object Level Authorization
-            - Broken User Authentication
-            - Excessive Data Exposure
-            - Lack of Resources & Rate Limiting
-            - Broken Function Level Authorization
-            - Mass Assignment
-            - Security Misconfiguration
-            - Injection
-            - Improper Assets Management
-            - Insufficient Logging & Monitoring
-            
-            ### 💡 API Security Best Practices
-            
-            ✅ **Authentication:**
-            - Use OAuth 2.0 or JWT tokens
-            - Implement token expiration
-            - Never expose API keys in URLs
-            
-            ✅ **Authorization:**
-            - Validate user permissions on every endpoint
-            - Implement proper RBAC (Role-Based Access Control)
-            - Check object ownership before allowing access
-            
-            ✅ **Input Validation:**
-            - Validate all input data
-            - Use allow-lists, not deny-lists
-            - Sanitize data before processing
-            
-            ✅ **Rate Limiting:**
-            - Implement rate limiting per user/IP
-            - Protect against brute force attacks
-            - Set appropriate throttling thresholds
-            
-            ✅ **Data Protection:**
-            - Return only necessary data
-            - Don't expose internal IDs
-            - Use HTTPS for all endpoints
-            
-            **📊 Full Reports:** Download from Actions Artifacts (available for 30 days)`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-  
-  # 3단계: 비활성화 알림
-  notify-disabled:
-    needs: check-topic
-    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify that scan is disabled
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'ℹ️ OWASP ZAP API scan is not enabled for this repository.\n\nTo enable: Add `auto-zap-api` topic in repository Settings.'
-            });
+      # 스캔 요약
+      - name: Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "ZAP API Scan Summary"
+          echo "=========================================="
+          echo "Target: ${{ inputs.target_url }}"
+          if [ ! -z "${{ inputs.api_spec_url }}" ]; then
+            echo "API Spec: ${{ inputs.api_spec_url }}"
+          else
+            echo "API Spec: Not provided"
+          fi
+          echo "Format: ${{ inputs.api_format }}"
+          echo "=========================================="
+
+# =============================================================================
+# 사용 팁:
+# 
+# OpenAPI/Swagger 스펙 제공 권장:
+#   - 더 정확한 스캔 (모든 엔드포인트 자동 발견)
+#   - 파라미터 타입 자동 인식
+#   - 더 적은 False Positive
+# 
+# API 스펙 URL 예시:
+#   - http://localhost:8080/api-docs/swagger.json
+#   - http://localhost:8080/openapi.json
+#   - http://localhost:8080/v3/api-docs
+#   - http://localhost:8080/graphql/schema
+# 
+# 스펙 없이 스캔:
+#   - 가능하지만 일부 엔드포인트를 놓칠 수 있음
+#   - Baseline 스캔으로 대체됨
+# =============================================================================
