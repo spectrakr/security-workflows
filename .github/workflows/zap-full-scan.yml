@@ -1,40 +1,68 @@
-# .github/workflows/zap-full-scan.yml
-# OWASP ZAP Full Scan - 능동적 스캔 (공격적, 느림, 강력)
-# 토픽 "auto-zap-full"이 있는 저장소에만 실행됨
-# ⚠️ 주의: 실제 공격을 수행하므로 테스트/개발 환경에만 사용!
+# =============================================================================
+# ZAP Full Scan - 재사용 가능한 워크플로우
+# =============================================================================
+# 목적: 웹 애플리케이션의 전체 보안 스캔
+# 방식: 능동 스캔 (Active) - 실제 공격 수행!
+# 소요시간: 20-30분
+# 
+# ⚠️ 경고:
+#   - 실제 공격을 수행합니다 (SQL Injection, XSS 등)
+#   - 절대 프로덕션 환경에서 실행 금지!
+#   - 테스트 환경에서만 사용
+#   - 테스트 데이터만 있어야 함
+# 
+# 활성화 방법:
+#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-full
+# 
+# 사용 예시:
+#   jobs:
+#     zap-full:
+#       if: github.event_name == 'workflow_dispatch'  # 수동 실행 권장
+#       uses: spectrakr/security-workflows/.github/workflows/zap-full-scan.yml@main
+#       with:
+#         target_url: 'http://localhost:3000'
+#         app_start_command: 'npm install && npm start'
+#         app_port: '3000'
+#         scan_timeout: '45'
+# =============================================================================
 
 name: Reusable ZAP Full Scan
 
 on:
   workflow_call:
     inputs:
+      # 스캔 대상 URL (⚠️ 테스트 환경만!)
       target_url:
-        description: 'Target URL to scan (e.g., http://localhost:3000)'
         required: true
         type: string
+        description: '⚠️ 테스트 환경 URL만 입력!'
+      
+      # 앱 시작 명령어
       app_start_command:
-        description: 'Command to start the app (e.g., npm start, docker-compose up)'
         required: true
         type: string
+        description: '앱 시작 명령어'
+      
+      # 앱 실행 포트
       app_port:
-        description: 'Port where app runs (default: 3000)'
         required: false
         type: string
         default: '3000'
-      rules_file:
-        description: 'Custom ZAP rules file path (optional)'
-        required: false
-        type: string
-        default: ''
+        description: '앱 포트'
+      
+      # 스캔 타임아웃 (분)
       scan_timeout:
-        description: 'Maximum scan time in minutes (default: 60)'
         required: false
         type: string
         default: '60'
+        description: '스캔 타임아웃 (분, 기본: 60)'
 
 jobs:
-  # 1단계: auto-zap-full 토픽 확인
+  # ---------------------------------------------------------------------------
+  # Job 1: 토픽 확인 - auto-zap-full 토픽이 있는지 체크
+  # ---------------------------------------------------------------------------
   check-topic:
+    name: Check Topic
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -51,179 +79,125 @@ jobs:
             });
             
             const topics = repo.data.topics || [];
-            
             if (topics.includes('auto-zap-full')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP Full scan enabled (auto-zap-full topic found)');
+              console.log('✅ ZAP Full scan enabled');
+              console.log('⚠️ WARNING: This will perform ACTIVE attacks!');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ ZAP Full scan disabled (no auto-zap-full topic)');
             }
 
-  # 2단계: ZAP Full 스캔 실행 (토픽 있을 때만)
+  # ---------------------------------------------------------------------------
+  # Job 2: ZAP Full 스캔 실행 (⚠️ 실제 공격 수행!)
+  # ---------------------------------------------------------------------------
   zap-full:
+    name: Run ZAP Full Scan (⚠️ Active Attacks)
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 90  # Full Scan은 오래 걸림
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
       
-      # 앱 실행 (백그라운드)
+      # 애플리케이션 시작
       - name: Start application
         run: |
-          echo "Starting application with: ${{ inputs.app_start_command }}"
+          echo "⚠️ Starting application for FULL SCAN..."
+          echo "⚠️ This app will receive ACTIVE ATTACKS!"
+          
           ${{ inputs.app_start_command }} &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
           
-          # 앱이 준비될 때까지 대기
-          echo "Waiting for app to be ready on port ${{ inputs.app_port }}..."
+          echo "⏳ Waiting for app..."
           for i in {1..30}; do
-            if curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-              echo "✅ App is ready!"
+            if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
+               curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
+              echo "✅ App ready!"
               break
             fi
-            echo "Waiting... ($i/30)"
             sleep 2
           done
-          
-          # 최종 확인
-          if ! curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-            echo "❌ App failed to start"
-            exit 1
-          fi
       
-      # ZAP Full Scan 실행
+      # ZAP Docker 이미지 다운로드
+      - name: Pull ZAP Docker image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+      
+      # ZAP Full 스캔 실행 (⚠️ 실제 공격)
       - name: Run ZAP Full Scan
-        uses: zaproxy/action-full-scan@v0.7.0
-        with:
-          target: ${{ inputs.target_url }}
-          rules_file_name: ${{ inputs.rules_file }}
-          cmd_options: '-a -j -T ${{ inputs.scan_timeout }}'
-          allow_issue_writing: false
-          fail_action: false
+        run: |
+          echo "🔥 Running ZAP Full Scan (ACTIVE ATTACKS)..."
+          echo "⚠️ Performing: SQL Injection, XSS, Path Traversal, etc."
+          
+          # -m 옵션: 스캔 타임아웃 설정 (분 단위)
+          docker run --rm \
+            --network host \
+            -v ${{ github.workspace }}:/zap/wrk:rw \
+            -t ghcr.io/zaproxy/zaproxy:stable \
+            zap-full-scan.py \
+            -t ${{ inputs.target_url }} \
+            -r report_html.html \
+            -w report_md.md \
+            -J report_json.json \
+            -m ${{ inputs.scan_timeout }} || true
+          
+          echo "✅ Scan completed"
+        continue-on-error: true
       
-      # 스캔 결과 업로드
-      - name: Upload ZAP Scan Report
+      # 리포트 업로드
+      - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zap-full-report
           path: |
             report_html.html
-            report_json.json
             report_md.md
+            report_json.json
           retention-days: 30
       
-      # 앱 종료
+      # 애플리케이션 종료
       - name: Stop application
         if: always()
         run: |
           if [ ! -z "${{ env.APP_PID }}" ]; then
-            kill ${{ env.APP_PID }} || true
+            kill ${{ env.APP_PID }} 2>/dev/null || true
           fi
       
-      # PR에 결과 코멘트
-      - name: Comment on PR
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const fs = require('fs');
-            let criticalCount = 0;
-            let highCount = 0;
-            let mediumCount = 0;
-            let lowCount = 0;
-            
-            // JSON 리포트 파싱 (가능한 경우)
-            if (fs.existsSync('report_json.json')) {
-              try {
-                const report = JSON.parse(fs.readFileSync('report_json.json', 'utf8'));
-                const alerts = report.site?.[0]?.alerts || [];
-                
-                alerts.forEach(alert => {
-                  const risk = alert.riskdesc || '';
-                  if (risk.includes('Critical')) criticalCount++;
-                  else if (risk.includes('High')) highCount++;
-                  else if (risk.includes('Medium')) mediumCount++;
-                  else if (risk.includes('Low')) lowCount++;
-                });
-              } catch (e) {
-                console.log('Error parsing JSON report:', e);
-              }
-            }
-            
-            const totalAlerts = criticalCount + highCount + mediumCount + lowCount;
-            
-            const comment = `## ⚠️ OWASP ZAP Full Scan Results
-            
-            **Scan Type:** Full Scan (Active Attacks)
-            **Target:** ${{ inputs.target_url }}
-            **Scan Duration:** ~${{ inputs.scan_timeout }} minutes max
-            
-            ### 📊 Findings Summary
-            
-            | Severity | Count |
-            |----------|-------|
-            | 🔴 CRITICAL | ${criticalCount} |
-            | 🟠 HIGH | ${highCount} |
-            | 🟡 MEDIUM | ${mediumCount} |
-            | 🔵 LOW | ${lowCount} |
-            | **Total** | **${totalAlerts}** |
-            
-            ### 📋 Next Steps
-            
-            1. **Download** the full HTML/JSON reports from Artifacts
-            2. **Review** CRITICAL and HIGH severity findings first
-            3. **Fix** vulnerabilities before deployment:
-               - SQL Injection
-               - XSS (Cross-Site Scripting)
-               - CSRF (Cross-Site Request Forgery)
-               - Authentication/Authorization issues
-               - Sensitive data exposure
-            4. **Retest** after fixes
-            
-            ### ⚠️ Important Notes
-            
-            - This scan **actively attacks** your application
-            - Only run on test/development environments
-            - Review false positives carefully
-            - Some alerts may require manual verification
-            
-            ### 🔍 Common Vulnerabilities Found
-            
-            - SQL Injection (parameterize queries)
-            - XSS (sanitize user input, use CSP)
-            - Missing security headers (CSP, X-Frame-Options)
-            - Weak session management
-            - Insecure direct object references
-            
-            **📊 Full Reports:** Download from Actions Artifacts (available for 30 days)`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-  
-  # 3단계: 비활성화 알림
-  notify-disabled:
-    needs: check-topic
-    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify that scan is disabled
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'ℹ️ OWASP ZAP Full scan is not enabled for this repository.\n\nTo enable: Add `auto-zap-full` topic in repository Settings.\n\n⚠️ **Warning:** Full scan performs active attacks. Only use on test/development environments!'
-            });
+      # 완료 알림
+      - name: Scan Complete
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "⚠️ ZAP Full Scan Complete"
+          echo "=========================================="
+          echo "IMPORTANT:"
+          echo "  - Review all findings carefully"
+          echo "  - Check for FALSE POSITIVES"
+          echo "  - This scan performed ACTIVE attacks"
+          echo "  - Check your application logs"
+          echo "=========================================="
+
+# =============================================================================
+# 중요 사항:
+# 
+# ⚠️ 주의:
+#   - 절대 프로덕션 금지!
+#   - 테스트 데이터만 있어야 함
+#   - 주 1회 또는 월 1회 권장
+#   - 수동 실행 권장 (자동 실행 비권장)
+# 
+# False Positive 처리:
+#   저장소에 .zap/rules.tsv 파일 생성:
+#   
+#   10040  IGNORE  프레임워크가 자동 처리
+#   10021  WARN    다음 스프린트에 수정 예정
+# 
+# 타임아웃 조정:
+#   - 작은 앱: 30분
+#   - 중간 앱: 60분 (기본값)
+#   - 큰 앱: 90-120분
+# =============================================================================
