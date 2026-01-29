@@ -127,6 +127,7 @@ jobs:
           # -v: 볼륨 마운트 (리포트 파일 저장)
           # || true: 취약점 발견 시에도 계속 진행
           docker run --rm \
+            --user root \
             --network host \
             -v ${{ github.workspace }}:/zap/wrk:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
