@@ -1,27 +1,53 @@
-# .github/workflows/trivy-scan.yml
-# 중앙 Trivy 보안 스캔 워크플로우
-# 토픽 "auto-trivy"가 있는 저장소에만 실행됨
+# =============================================================================
+# Trivy Security Scan - 재사용 가능한 워크플로우
+# =============================================================================
+# 목적: 컨테이너, 의존성, 파일시스템 보안 취약점 스캔
+# 방식: 정적 분석 (CVE 데이터베이스 기반)
+# 소요시간: 1-3분
+# 
+# 활성화 방법 (자동):
+#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-trivy
+# 
+# 수동 실행:
+#   security.yml의 workflow_dispatch로 force_run: true 전달
+# =============================================================================
 
 name: Reusable Trivy Security Scan
 
-# 다른 저장소에서 호출 가능하게 설정
 on:
   workflow_call:
+    inputs:
+      force_run:
+        required: false
+        type: boolean
+        default: false
+        description: '토픽 없이 강제 실행'
 
 jobs:
-  # 1단계: auto-trivy 토픽 확인
+  # ---------------------------------------------------------------------------
+  # Job 1: 토픽 확인 또는 강제 실행
+  # ---------------------------------------------------------------------------
   check-topic:
+    name: Check Topic or Force Run
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
     
     steps:
-      - name: Check for auto-trivy topic
+      - name: Check for auto-trivy topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
-            // 저장소 정보 가져오기
+            // force_run이 true면 무조건 실행
+            if (${{ inputs.force_run }}) {
+              core.setOutput('enabled', 'true');
+              console.log('✅ Trivy scan enabled (force_run = true)');
+              console.log('💡 Running without topic check');
+              return;
+            }
+            
+            // 토픽 확인
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
@@ -29,25 +55,26 @@ jobs:
             
             const topics = repo.data.topics || [];
             
-            // "auto-trivy" 토픽이 있는지 확인
             if (topics.includes('auto-trivy')) {
               core.setOutput('enabled', 'true');
               console.log('✅ Trivy scan enabled (auto-trivy topic found)');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ Trivy scan disabled (no auto-trivy topic)');
+              console.log('💡 Tip: Add topic with "gh repo edit --add-topic auto-trivy"');
             }
 
-  # 2단계: Trivy 보안 스캔 실행 (토픽 있을 때만)
+  # ---------------------------------------------------------------------------
+  # Job 2: Trivy 보안 스캔 실행
+  # ---------------------------------------------------------------------------
   trivy-scan:
+    name: Run Trivy Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
-    # PR에서는 실패해도 머지 가능 (경고만)
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     
     steps:
-      # 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v3
       
@@ -64,6 +91,7 @@ jobs:
       - name: Build Docker image
         if: hashFiles('Dockerfile') != ''
         run: |
+          echo "🐳 Building Docker image for scanning..."
           docker build -t scan-image:${{ github.sha }} .
       
       # Docker 이미지 스캔
@@ -105,21 +133,28 @@ jobs:
               repo: context.repo.repo,
               body: comment
             });
-  
-  # 3단계: 비활성화 알림 (선택사항)
-  notify-disabled:
-    needs: check-topic
-    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify that scan is disabled
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'ℹ️ Trivy security scan is not enabled for this repository.\n\nTo enable: Add `auto-trivy` topic in repository Settings.'
-            });
+
+# =============================================================================
+# 참고사항:
+# 
+# 검사 대상:
+#   - package.json, package-lock.json (npm)
+#   - requirements.txt, Pipfile.lock (Python)
+#   - go.mod, go.sum (Go)
+#   - pom.xml (Maven)
+#   - Dockerfile 기반 이미지
+# 
+# 심각도 레벨:
+#   - CRITICAL: 즉시 수정 필요
+#   - HIGH: 우선 수정 권장
+#   - MEDIUM, LOW: 검토 후 수정
+# 
+# False Positive 처리:
+#   .trivyignore 파일 생성:
+#   
+#   # 프레임워크가 자동 처리
+#   CVE-2021-12345
+#   
+#   # 다음 스프린트에 수정 예정
+#   CVE-2021-67890
+# =============================================================================
