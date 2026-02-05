@@ -9,19 +9,11 @@
 #   - API 엔드포인트 자동 탐지
 #   - REST API 및 GraphQL 모두 지원
 # 
-# 활성화 방법:
+# 활성화 방법 (자동):
 #   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-api
 # 
-# 사용 예시:
-#   jobs:
-#     zap-api:
-#       uses: spectrakr/security-workflows/.github/workflows/zap-api-scan.yml@main
-#       with:
-#         target_url: 'http://localhost:8080/api'
-#         app_start_command: 'npm install && npm start'
-#         app_port: '8080'
-#         api_spec_url: 'http://localhost:8080/api-docs/swagger.json'
-#         api_format: 'openapi'
+# 수동 실행:
+#   security.yml의 workflow_dispatch로 force_run: true 전달
 # =============================================================================
 
 name: Reusable ZAP API Scan
@@ -29,6 +21,12 @@ name: Reusable ZAP API Scan
 on:
   workflow_call:
     inputs:
+      force_run:
+        required: false
+        type: boolean
+        default: false
+        description: '토픽 없이 강제 실행'
+      
       # API Base URL
       target_url:
         required: true
@@ -64,32 +62,43 @@ on:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1: 토픽 확인 - auto-zap-api 토픽이 있는지 체크
+  # Job 1: 토픽 확인 또는 강제 실행
   # ---------------------------------------------------------------------------
   check-topic:
-    name: Check Topic
+    name: Check Topic or Force Run
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
     
     steps:
-      - name: Check for auto-zap-api topic
+      - name: Check for auto-zap-api topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
+            // force_run이 true면 무조건 실행
+            if (${{ inputs.force_run }}) {
+              core.setOutput('enabled', 'true');
+              console.log('✅ ZAP API scan enabled (force_run = true)');
+              console.log('💡 Running without topic check');
+              return;
+            }
+            
+            // 토픽 확인
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
             });
             
             const topics = repo.data.topics || [];
+            
             if (topics.includes('auto-zap-api')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP API scan enabled');
+              console.log('✅ ZAP API scan enabled (auto-zap-api topic found)');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ ZAP API scan disabled (no auto-zap-api topic)');
+              console.log('💡 Tip: Add topic with "gh repo edit --add-topic auto-zap-api"');
             }
 
   # ---------------------------------------------------------------------------
@@ -143,6 +152,8 @@ jobs:
         if: inputs.api_spec_url != ''
         run: |
           echo "🔍 Running ZAP API Scan with spec..."
+          echo "Target: ${{ inputs.target_url }}"
+          echo "Spec: ${{ inputs.api_spec_url }}"
           
           # API 스펙 다운로드
           curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.json 2>/dev/null || \
@@ -164,14 +175,14 @@ jobs:
           echo "✅ Scan completed"
         continue-on-error: true
       
-      # ZAP API 스캔 실행 (스펙 없을 때 - Baseline으로 대체)
+      # ZAP API 스캔 실행 (스펙 없을 때)
       - name: Run ZAP API Scan (without spec)
         if: inputs.api_spec_url == ''
         run: |
           echo "🔍 Running ZAP API Scan without spec..."
           echo "⚠️ Note: Without API spec, some endpoints may be missed"
+          echo "Target: ${{ inputs.target_url }}"
           
-          # 스펙 없이 Baseline 스캔 수행
           docker run --rm \
             --network host \
             -v ${{ github.workspace }}:/zap/wrk:rw \
@@ -190,7 +201,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zap-api-report
+          name: zap-api-report-${{ github.run_number }}
           path: |
             report_html.html
             report_md.md
@@ -220,6 +231,8 @@ jobs:
           fi
           echo "Format: ${{ inputs.api_format }}"
           echo "=========================================="
+          echo ""
+          echo "📊 Download report: Actions → Artifacts"
 
 # =============================================================================
 # 사용 팁:
@@ -235,7 +248,9 @@ jobs:
 #   - http://localhost:8080/v3/api-docs
 #   - http://localhost:8080/graphql/schema
 # 
-# 스펙 없이 스캔:
-#   - 가능하지만 일부 엔드포인트를 놓칠 수 있음
-#   - Baseline 스캔으로 대체됨
+# 검사 항목:
+#   - API 인증/인가 오류
+#   - Rate Limiting 부재
+#   - CORS 설정 오류
+#   - 민감한 데이터 노출
 # =============================================================================
