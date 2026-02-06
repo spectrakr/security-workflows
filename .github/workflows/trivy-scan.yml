@@ -1,19 +1,10 @@
-# =============================================================================
-# Trivy Security Scan - 재사용 가능한 워크플로우
-# =============================================================================
-# 목적: 컨테이너, 의존성, 파일시스템 보안 취약점 스캔
-# 방식: 정적 분석 (CVE 데이터베이스 기반)
-# 소요시간: 1-3분
-# 
-# 활성화 방법 (자동):
-#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-trivy
-# 
-# 수동 실행:
-#   security.yml의 workflow_dispatch로 force_run: true 전달
-# =============================================================================
+# .github/workflows/trivy-scan.yml
+# 중앙 Trivy 보안 스캔 워크플로우
+# 토픽 "auto-trivy"가 있는 저장소에만 실행됨
 
 name: Reusable Trivy Security Scan
 
+# 다른 저장소에서 호출 가능하게 설정
 on:
   workflow_call:
     inputs:
@@ -21,14 +12,10 @@ on:
         required: false
         type: boolean
         default: false
-        description: '토픽 없이 강제 실행'
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job 1: 토픽 확인 또는 강제 실행
-  # ---------------------------------------------------------------------------
+  # 1단계: auto-trivy 토픽 확인
   check-topic:
-    name: Check Topic or Force Run
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
@@ -39,15 +26,14 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // force_run이 true면 무조건 실행
+            // force_run이 true면 토픽 무시하고 실행
             if (${{ inputs.force_run }}) {
               core.setOutput('enabled', 'true');
-              console.log('✅ Trivy scan enabled (force_run = true)');
-              console.log('💡 Running without topic check');
+              console.log('✅ Trivy scan enabled (force_run=true)');
               return;
             }
             
-            // 토픽 확인
+            // 저장소 정보 가져오기
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
@@ -55,31 +41,41 @@ jobs:
             
             const topics = repo.data.topics || [];
             
+            // "auto-trivy" 토픽이 있는지 확인
             if (topics.includes('auto-trivy')) {
               core.setOutput('enabled', 'true');
               console.log('✅ Trivy scan enabled (auto-trivy topic found)');
             } else {
               core.setOutput('enabled', 'false');
               console.log('⏭️ Trivy scan disabled (no auto-trivy topic)');
-              console.log('💡 Tip: Add topic with "gh repo edit --add-topic auto-trivy"');
             }
 
-  # ---------------------------------------------------------------------------
-  # Job 2: Trivy 보안 스캔 실행
-  # ---------------------------------------------------------------------------
+  # 2단계: Trivy 보안 스캔 실행 (토픽 있을 때만)
   trivy-scan:
-    name: Run Trivy Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
+    # PR에서는 실패해도 머지 가능 (경고만)
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     
     steps:
+      # 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v3
       
-      # 파일시스템 스캔 (의존성 파일 검사)
-      - name: Run Trivy filesystem scan
+      # 파일시스템 스캔 (JSON 리포트)
+      - name: Run Trivy filesystem scan (JSON)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'json'
+          output: 'trivy-fs-results.json'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      # 파일시스템 스캔 (콘솔 출력용)
+      - name: Run Trivy filesystem scan (Table)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
@@ -91,11 +87,22 @@ jobs:
       - name: Build Docker image
         if: hashFiles('Dockerfile') != ''
         run: |
-          echo "🐳 Building Docker image for scanning..."
           docker build -t scan-image:${{ github.sha }} .
       
-      # Docker 이미지 스캔
-      - name: Run Trivy image scan
+      # Docker 이미지 스캔 (JSON 리포트)
+      - name: Run Trivy image scan (JSON)
+        if: hashFiles('Dockerfile') != ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'scan-image:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-image-results.json'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      # Docker 이미지 스캔 (콘솔 출력용)
+      - name: Run Trivy image scan (Table)
         if: hashFiles('Dockerfile') != ''
         uses: aquasecurity/trivy-action@master
         with:
@@ -103,6 +110,83 @@ jobs:
           image-ref: 'scan-image:${{ github.sha }}'
           format: 'table'
           severity: 'CRITICAL,HIGH'
+      
+      # HTML 리포트 생성 (파일시스템 스캔 결과)
+      - name: Generate HTML report from filesystem scan
+        if: hashFiles('trivy-fs-results.json') != ''
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/work \
+            aquasec/trivy:latest \
+            convert \
+            --format template \
+            --template "@contrib/html.tpl" \
+            --output /work/trivy-fs-report.html \
+            /work/trivy-fs-results.json
+        continue-on-error: true
+      
+      # HTML 리포트 생성 (이미지 스캔 결과)
+      - name: Generate HTML report from image scan
+        if: hashFiles('trivy-image-results.json') != ''
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/work \
+            aquasec/trivy:latest \
+            convert \
+            --format template \
+            --template "@contrib/html.tpl" \
+            --output /work/trivy-image-report.html \
+            /work/trivy-image-results.json
+        continue-on-error: true
+      
+      # 리포트 요약 생성
+      - name: Create report summary
+        if: always()
+        run: |
+          echo "# Trivy Security Scan Report" > report-summary.md
+          echo "" >> report-summary.md
+          echo "**Scan Date:** $(date)" >> report-summary.md
+          echo "**Repository:** ${{ github.repository }}" >> report-summary.md
+          echo "**Branch:** ${{ github.ref_name }}" >> report-summary.md
+          echo "**Commit:** ${{ github.sha }}" >> report-summary.md
+          echo "" >> report-summary.md
+          echo "## Scan Results" >> report-summary.md
+          echo "" >> report-summary.md
+          
+          if [ -f trivy-fs-results.json ]; then
+            echo "✅ Filesystem scan completed" >> report-summary.md
+          fi
+          
+          if [ -f trivy-image-results.json ]; then
+            echo "✅ Docker image scan completed" >> report-summary.md
+          fi
+          
+          echo "" >> report-summary.md
+          echo "## Available Reports" >> report-summary.md
+          echo "- trivy-fs-results.json (Filesystem scan - JSON)" >> report-summary.md
+          echo "- trivy-fs-report.html (Filesystem scan - HTML)" >> report-summary.md
+          
+          if [ -f trivy-image-results.json ]; then
+            echo "- trivy-image-results.json (Image scan - JSON)" >> report-summary.md
+            echo "- trivy-image-report.html (Image scan - HTML)" >> report-summary.md
+          fi
+          
+          echo "" >> report-summary.md
+          echo "Download reports from Actions → Artifacts → trivy-security-report" >> report-summary.md
+      
+      # 리포트 파일 업로드
+      - name: Upload Trivy Security Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-security-report
+          path: |
+            trivy-fs-results.json
+            trivy-fs-report.html
+            trivy-image-results.json
+            trivy-image-report.html
+            report-summary.md
+          retention-days: 7
       
       # PR에 취약점 발견 시 자동 코멘트
       - name: Comment on PR
@@ -116,9 +200,19 @@ jobs:
             
             **📋 Next Steps:**
             1. Check the Actions logs for detailed vulnerability information
-            2. Review CRITICAL and HIGH severity issues
-            3. Update vulnerable dependencies to fixed versions
-            4. Push changes to re-run this scan
+            2. Download the full report from Artifacts (see below)
+            3. Review CRITICAL and HIGH severity issues
+            4. Update vulnerable dependencies to fixed versions
+            5. Push changes to re-run this scan
+            
+            **📊 Download Detailed Reports:**
+            Go to: Actions → This workflow run → Artifacts → **trivy-security-report**
+            
+            Available reports:
+            - \`trivy-fs-report.html\` - Open in browser for detailed filesystem scan results
+            - \`trivy-image-report.html\` - Open in browser for Docker image scan results (if applicable)
+            - \`trivy-fs-results.json\` - JSON format for automation
+            - \`report-summary.md\` - Quick summary
             
             **ℹ️ Note:** This is a warning - you can still merge if necessary.
             
@@ -133,28 +227,21 @@ jobs:
               repo: context.repo.repo,
               body: comment
             });
-
-# =============================================================================
-# 참고사항:
-# 
-# 검사 대상:
-#   - package.json, package-lock.json (npm)
-#   - requirements.txt, Pipfile.lock (Python)
-#   - go.mod, go.sum (Go)
-#   - pom.xml (Maven)
-#   - Dockerfile 기반 이미지
-# 
-# 심각도 레벨:
-#   - CRITICAL: 즉시 수정 필요
-#   - HIGH: 우선 수정 권장
-#   - MEDIUM, LOW: 검토 후 수정
-# 
-# False Positive 처리:
-#   .trivyignore 파일 생성:
-#   
-#   # 프레임워크가 자동 처리
-#   CVE-2021-12345
-#   
-#   # 다음 스프린트에 수정 예정
-#   CVE-2021-67890
-# =============================================================================
+  
+  # 3단계: 비활성화 알림 (선택사항)
+  notify-disabled:
+    needs: check-topic
+    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify that scan is disabled
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'ℹ️ Trivy security scan is not enabled for this repository.\n\nTo enable: Add `auto-trivy` topic in repository Settings.'
+            });
