@@ -1,6 +1,6 @@
 # .github/workflows/trivy-scan.yml
 # 중앙 Trivy 보안 스캔 워크플로우
-# 토픽 "auto-trivy"가 있는 저장소에만 실행됨
+# 서비스 레포지토리의 'secrets: inherit' 설정을 통해 비밀값을 직접 참조합니다.
 
 name: Reusable Trivy Security Scan
 
@@ -11,7 +11,7 @@ on:
         required: false
         type: boolean
         default: false
-      image_ref:  # 릴리즈된 원격 이미지 주소를 받기 위한 필드 추가
+      image_ref:
         required: false
         type: string
         default: ''
@@ -21,47 +21,43 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
-    
     steps:
       - name: Check for auto-trivy topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
+            // force_run이 true거나 원격 이미지 주소가 입력되면 실행
             if (${{ inputs.force_run }} || "${{ inputs.image_ref }}" !== "") {
               core.setOutput('enabled', 'true');
-              console.log('✅ Trivy scan enabled (forced or remote image provided)');
               return;
             }
-            
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
             });
-            
             const topics = repo.data.topics || [];
-            
-            if (topics.includes('auto-trivy')) {
-              core.setOutput('enabled', 'true');
-              console.log('✅ Trivy scan enabled (auto-trivy topic found)');
-            } else {
-              core.setOutput('enabled', 'false');
-              console.log('⏭️ Trivy scan disabled');
-            }
+            core.setOutput('enabled', topics.includes('auto-trivy') ? 'true' : 'false');
 
   trivy-scan:
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: ${{ github.event_name == 'pull_request' }}
-    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # -----------------------------------------------------------------------
-      # 1. 파일 시스템 스캔 (의존성 라이브러리)
-      # -----------------------------------------------------------------------
+      # 1. 사내 Nexus 레지스트리 로그인 (상속받은 비밀값 직접 사용)
+      - name: Login to Nexus Registry
+        if: inputs.image_ref != '' && secrets.NEXUS_USER != ''
+        uses: docker/login-action@v3
+        with:
+          # 이미지 주소에서 도메인 부분 추출 (없으면 기본 사내 주소 사용)
+          registry: ${{ contains(inputs.image_ref, '/') && strings.split(inputs.image_ref, '/')[0] || 'registry-nexus.spectra.co.kr' }}
+          username: ${{ secrets.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASSWORD }}
+
+      # 2. 파일 시스템 스캔 (의존성 라이브러리)
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -71,52 +67,36 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-      # -----------------------------------------------------------------------
-      # 2. 원격 릴리즈 이미지 스캔 (image_ref가 있을 경우 우선 실행)
-      # -----------------------------------------------------------------------
-      - name: Run Trivy on Remote Release Image
-        if: inputs.image_ref != ''
+      # 3. 이미지 스캔 (원격 또는 로컬 빌드)
+      - name: Run Trivy Image Scan
         uses: aquasecurity/trivy-action@master
+        env:
+          # Triv이 스캔 시 인증이 필요한 경우 상속받은 비밀값 사용
+          TRIVY_USERNAME: ${{ secrets.NEXUS_USER }}
+          TRIVY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         with:
-          image-ref: ${{ inputs.image_ref }}
+          # image_ref가 있으면 원격 스캔, 없으면 Dockerfile 존재 시 로컬 빌드 스캔
+          image-ref: ${{ inputs.image_ref != '' && inputs.image_ref || (hashFiles('Dockerfile') != '' && format('local-image:{0}', github.sha) || '') }}
+          scan-type: 'image'
           format: 'json'
-          output: 'trivy-remote-image-results.json'
+          output: 'trivy-image-results.json'
           severity: 'CRITICAL,HIGH'
-        continue-on-error: true
+        if: inputs.image_ref != '' || hashFiles('Dockerfile') != ''
 
-      # -----------------------------------------------------------------------
-      # 3. 로컬 Dockerfile 빌드 및 스캔 (image_ref가 없을 때만 실행)
-      # -----------------------------------------------------------------------
-      - name: Build Local Docker image
-        if: inputs.image_ref == '' && hashFiles('Dockerfile') != ''
-        run: |
-          docker build -t local-scan-image:${{ github.sha }} .
-
-      - name: Run Trivy on Local Image
-        if: inputs.image_ref == '' && hashFiles('Dockerfile') != ''
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'local-scan-image:${{ github.sha }}'
-          format: 'json'
-          output: 'trivy-local-image-results.json'
-          severity: 'CRITICAL,HIGH'
-        continue-on-error: true
-
-      # -----------------------------------------------------------------------
-      # 4. 리포트 생성 및 업로드
-      # -----------------------------------------------------------------------
+      # 4. 결과 리포트 생성 및 통합
       - name: Generate HTML Reports
+        if: always()
         run: |
-          # 스캔 결과들을 HTML로 변환하는 로직 (기존과 동일)
           for f in trivy-*-results.json; do
-            [ -e "$f" ] || continue
-            output_name="${f%.json}.html"
-            docker run --rm -v ${{ github.workspace }}:/work aquasec/trivy:latest convert --format template --template "@contrib/html.tpl" --output "/work/$output_name" "/work/$f"
+            [ -f "$f" ] || continue
+            docker run --rm -v ${{ github.workspace }}:/work aquasec/trivy:latest convert \
+              --format template --template "@contrib/html.tpl" \
+              --output "/work/${f%.json}.html" "/work/$f"
           done
-        continue-on-error: true
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: trivy-security-report
           path: |
