@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         default: ''
-    # 💡 재사용 워크플로우의 익스프레션(if 등)에서 secrets를 참조하려면 여기에 정의가 필요합니다.
+    # 재사용 워크플로우 호출 시 전달받거나 상속받을 비밀값 정의
     secrets:
       NEXUS_USER:
         required: false
@@ -62,9 +62,10 @@ jobs:
           DOMAIN=$(echo "${{ inputs.image_ref }}" | cut -d'/' -f1)
           echo "host=$DOMAIN" >> $GITHUB_OUTPUT
 
-      # 2. 사내 Nexus 레지스트리 로그인 (상속받은 비밀값 직접 사용)
+      # 2. 사내 Nexus 레지스트리 로그인
+      # 💡 'secrets' 키워드가 if 조건문에서 에러를 유발하므로 inputs.image_ref 여부만 체크합니다.
       - name: Login to Nexus Registry
-        if: inputs.image_ref != '' && secrets.NEXUS_USER != ''
+        if: inputs.image_ref != ''
         uses: docker/login-action@v3
         with:
           registry: ${{ steps.get_reg.outputs.host }}
