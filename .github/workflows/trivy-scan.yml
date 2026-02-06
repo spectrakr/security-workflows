@@ -15,6 +15,12 @@ on:
         required: false
         type: string
         default: ''
+    # 💡 재사용 워크플로우의 익스프레션(if 등)에서 secrets를 참조하려면 여기에 정의가 필요합니다.
+    secrets:
+      NEXUS_USER:
+        required: false
+      NEXUS_PASSWORD:
+        required: false
 
 jobs:
   check-topic:
