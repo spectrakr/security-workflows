@@ -47,17 +47,25 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 1. 사내 Nexus 레지스트리 로그인 (상속받은 비밀값 직접 사용)
+      # 1. 이미지 주소에서 레지스트리 도메인 추출 (익스프레션 오류 해결용)
+      - name: Extract Registry Host
+        if: inputs.image_ref != ''
+        id: get_reg
+        run: |
+          # 슬래시(/)를 기준으로 첫 번째 파트를 추출 (예: registry-nexus.spectra.co.kr)
+          DOMAIN=$(echo "${{ inputs.image_ref }}" | cut -d'/' -f1)
+          echo "host=$DOMAIN" >> $GITHUB_OUTPUT
+
+      # 2. 사내 Nexus 레지스트리 로그인 (상속받은 비밀값 직접 사용)
       - name: Login to Nexus Registry
         if: inputs.image_ref != '' && secrets.NEXUS_USER != ''
         uses: docker/login-action@v3
         with:
-          # 이미지 주소에서 도메인 부분 추출 (없으면 기본 사내 주소 사용)
-          registry: ${{ contains(inputs.image_ref, '/') && strings.split(inputs.image_ref, '/')[0] || 'registry-nexus.spectra.co.kr' }}
+          registry: ${{ steps.get_reg.outputs.host }}
           username: ${{ secrets.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASSWORD }}
 
-      # 2. 파일 시스템 스캔 (의존성 라이브러리)
+      # 3. 파일 시스템 스캔 (의존성 라이브러리)
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -67,11 +75,11 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-      # 3. 이미지 스캔 (원격 또는 로컬 빌드)
+      # 4. 이미지 스캔 (원격 또는 로컬 빌드)
       - name: Run Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         env:
-          # Triv이 스캔 시 인증이 필요한 경우 상속받은 비밀값 사용
+          # Trivy 스캔 시 인증이 필요한 경우 상속받은 비밀값 사용
           TRIVY_USERNAME: ${{ secrets.NEXUS_USER }}
           TRIVY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         with:
@@ -83,7 +91,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
         if: inputs.image_ref != '' || hashFiles('Dockerfile') != ''
 
-      # 4. 결과 리포트 생성 및 통합
+      # 5. 결과 리포트 생성 및 통합
       - name: Generate HTML Reports
         if: always()
         run: |
