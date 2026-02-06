@@ -4,7 +4,6 @@
 
 name: Reusable Trivy Security Scan
 
-# 다른 저장소에서 호출 가능하게 설정
 on:
   workflow_call:
     inputs:
@@ -12,9 +11,12 @@ on:
         required: false
         type: boolean
         default: false
+      image_ref:  # 릴리즈된 원격 이미지 주소를 받기 위한 필드 추가
+        required: false
+        type: string
+        default: ''
 
 jobs:
-  # 1단계: auto-trivy 토픽 확인
   check-topic:
     runs-on: ubuntu-latest
     outputs:
@@ -26,14 +28,12 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            // force_run이 true면 토픽 무시하고 실행
-            if (${{ inputs.force_run }}) {
+            if (${{ inputs.force_run }} || "${{ inputs.image_ref }}" !== "") {
               core.setOutput('enabled', 'true');
-              console.log('✅ Trivy scan enabled (force_run=true)');
+              console.log('✅ Trivy scan enabled (forced or remote image provided)');
               return;
             }
             
-            // 저장소 정보 가져오기
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
@@ -41,207 +41,85 @@ jobs:
             
             const topics = repo.data.topics || [];
             
-            // "auto-trivy" 토픽이 있는지 확인
             if (topics.includes('auto-trivy')) {
               core.setOutput('enabled', 'true');
               console.log('✅ Trivy scan enabled (auto-trivy topic found)');
             } else {
               core.setOutput('enabled', 'false');
-              console.log('⏭️ Trivy scan disabled (no auto-trivy topic)');
+              console.log('⏭️ Trivy scan disabled');
             }
 
-  # 2단계: Trivy 보안 스캔 실행 (토픽 있을 때만)
   trivy-scan:
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: ubuntu-latest
-    # PR에서는 실패해도 머지 가능 (경고만)
     continue-on-error: ${{ github.event_name == 'pull_request' }}
     
     steps:
-      # 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v3
-      
-      # 파일시스템 스캔 (JSON 리포트)
-      - name: Run Trivy filesystem scan (JSON)
+
+      # -----------------------------------------------------------------------
+      # 1. 파일 시스템 스캔 (의존성 라이브러리)
+      # -----------------------------------------------------------------------
+      - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
-          scan-ref: '.'
           format: 'json'
           output: 'trivy-fs-results.json'
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
-      
-      # 파일시스템 스캔 (콘솔 출력용)
-      - name: Run Trivy filesystem scan (Table)
+
+      # -----------------------------------------------------------------------
+      # 2. 원격 릴리즈 이미지 스캔 (image_ref가 있을 경우 우선 실행)
+      # -----------------------------------------------------------------------
+      - name: Run Trivy on Remote Release Image
+        if: inputs.image_ref != ''
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'table'
-          severity: 'CRITICAL,HIGH'
-      
-      # Docker 이미지 빌드 (Dockerfile 있는 경우)
-      - name: Build Docker image
-        if: hashFiles('Dockerfile') != ''
-        run: |
-          docker build -t scan-image:${{ github.sha }} .
-      
-      # Docker 이미지 스캔 (JSON 리포트)
-      - name: Run Trivy image scan (JSON)
-        if: hashFiles('Dockerfile') != ''
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'image'
-          image-ref: 'scan-image:${{ github.sha }}'
+          image-ref: ${{ inputs.image_ref }}
           format: 'json'
-          output: 'trivy-image-results.json'
+          output: 'trivy-remote-image-results.json'
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
-      
-      # Docker 이미지 스캔 (콘솔 출력용)
-      - name: Run Trivy image scan (Table)
-        if: hashFiles('Dockerfile') != ''
+
+      # -----------------------------------------------------------------------
+      # 3. 로컬 Dockerfile 빌드 및 스캔 (image_ref가 없을 때만 실행)
+      # -----------------------------------------------------------------------
+      - name: Build Local Docker image
+        if: inputs.image_ref == '' && hashFiles('Dockerfile') != ''
+        run: |
+          docker build -t local-scan-image:${{ github.sha }} .
+
+      - name: Run Trivy on Local Image
+        if: inputs.image_ref == '' && hashFiles('Dockerfile') != ''
         uses: aquasecurity/trivy-action@master
         with:
-          scan-type: 'image'
-          image-ref: 'scan-image:${{ github.sha }}'
-          format: 'table'
+          image-ref: 'local-scan-image:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-local-image-results.json'
           severity: 'CRITICAL,HIGH'
-      
-      # HTML 리포트 생성 (파일시스템 스캔 결과)
-      - name: Generate HTML report from filesystem scan
-        if: hashFiles('trivy-fs-results.json') != ''
-        run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/work \
-            aquasec/trivy:latest \
-            convert \
-            --format template \
-            --template "@contrib/html.tpl" \
-            --output /work/trivy-fs-report.html \
-            /work/trivy-fs-results.json
         continue-on-error: true
-      
-      # HTML 리포트 생성 (이미지 스캔 결과)
-      - name: Generate HTML report from image scan
-        if: hashFiles('trivy-image-results.json') != ''
+
+      # -----------------------------------------------------------------------
+      # 4. 리포트 생성 및 업로드
+      # -----------------------------------------------------------------------
+      - name: Generate HTML Reports
         run: |
-          docker run --rm \
-            -v ${{ github.workspace }}:/work \
-            aquasec/trivy:latest \
-            convert \
-            --format template \
-            --template "@contrib/html.tpl" \
-            --output /work/trivy-image-report.html \
-            /work/trivy-image-results.json
+          # 스캔 결과들을 HTML로 변환하는 로직 (기존과 동일)
+          for f in trivy-*-results.json; do
+            [ -e "$f" ] || continue
+            output_name="${f%.json}.html"
+            docker run --rm -v ${{ github.workspace }}:/work aquasec/trivy:latest convert --format template --template "@contrib/html.tpl" --output "/work/$output_name" "/work/$f"
+          done
         continue-on-error: true
-      
-      # 리포트 요약 생성
-      - name: Create report summary
-        if: always()
-        run: |
-          echo "# Trivy Security Scan Report" > report-summary.md
-          echo "" >> report-summary.md
-          echo "**Scan Date:** $(date)" >> report-summary.md
-          echo "**Repository:** ${{ github.repository }}" >> report-summary.md
-          echo "**Branch:** ${{ github.ref_name }}" >> report-summary.md
-          echo "**Commit:** ${{ github.sha }}" >> report-summary.md
-          echo "" >> report-summary.md
-          echo "## Scan Results" >> report-summary.md
-          echo "" >> report-summary.md
-          
-          if [ -f trivy-fs-results.json ]; then
-            echo "✅ Filesystem scan completed" >> report-summary.md
-          fi
-          
-          if [ -f trivy-image-results.json ]; then
-            echo "✅ Docker image scan completed" >> report-summary.md
-          fi
-          
-          echo "" >> report-summary.md
-          echo "## Available Reports" >> report-summary.md
-          echo "- trivy-fs-results.json (Filesystem scan - JSON)" >> report-summary.md
-          echo "- trivy-fs-report.html (Filesystem scan - HTML)" >> report-summary.md
-          
-          if [ -f trivy-image-results.json ]; then
-            echo "- trivy-image-results.json (Image scan - JSON)" >> report-summary.md
-            echo "- trivy-image-report.html (Image scan - HTML)" >> report-summary.md
-          fi
-          
-          echo "" >> report-summary.md
-          echo "Download reports from Actions → Artifacts → trivy-security-report" >> report-summary.md
-      
-      # 리포트 파일 업로드
-      - name: Upload Trivy Security Reports
+
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: trivy-security-report
           path: |
-            trivy-fs-results.json
-            trivy-fs-report.html
-            trivy-image-results.json
-            trivy-image-report.html
-            report-summary.md
+            trivy-*.json
+            trivy-*.html
           retention-days: 7
-      
-      # PR에 취약점 발견 시 자동 코멘트
-      - name: Comment on PR
-        if: github.event_name == 'pull_request' && failure()
-        uses: actions/github-script@v6
-        with:
-          script: |
-            const comment = `## ⚠️ Security Vulnerabilities Detected
-            
-            Trivy security scan found vulnerabilities in this PR.
-            
-            **📋 Next Steps:**
-            1. Check the Actions logs for detailed vulnerability information
-            2. Download the full report from Artifacts (see below)
-            3. Review CRITICAL and HIGH severity issues
-            4. Update vulnerable dependencies to fixed versions
-            5. Push changes to re-run this scan
-            
-            **📊 Download Detailed Reports:**
-            Go to: Actions → This workflow run → Artifacts → **trivy-security-report**
-            
-            Available reports:
-            - \`trivy-fs-report.html\` - Open in browser for detailed filesystem scan results
-            - \`trivy-image-report.html\` - Open in browser for Docker image scan results (if applicable)
-            - \`trivy-fs-results.json\` - JSON format for automation
-            - \`report-summary.md\` - Quick summary
-            
-            **ℹ️ Note:** This is a warning - you can still merge if necessary.
-            
-            **🔍 Common Fixes:**
-            - Update package.json / requirements.txt to latest secure versions
-            - Rebuild Docker image with updated base image
-            - Check for security patches from package maintainers`;
-            
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
-  
-  # 3단계: 비활성화 알림 (선택사항)
-  notify-disabled:
-    needs: check-topic
-    if: needs.check-topic.outputs.enabled == 'false' && github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Notify that scan is disabled
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: 'ℹ️ Trivy security scan is not enabled for this repository.\n\nTo enable: Add `auto-trivy` topic in repository Settings.'
-            });
