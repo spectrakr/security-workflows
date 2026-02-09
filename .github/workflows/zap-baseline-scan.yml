@@ -4,12 +4,6 @@
 # 목적: 웹 애플리케이션의 기본 보안 취약점 스캔
 # 방식: 수동 스캔 (Passive) - 실제 공격 없음, 안전함
 # 소요시간: 5-10분
-# 
-# 활성화 방법 (자동):
-#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-baseline
-# 
-# 수동 실행:
-#   security.yml의 workflow_dispatch로 force_run: true 전달
 # =============================================================================
 
 name: Reusable ZAP Baseline Scan
@@ -23,19 +17,16 @@ on:
         default: false
         description: '토픽 없이 강제 실행'
       
-      # 스캔 대상 URL
       target_url:
         required: true
         type: string
         description: '스캔할 URL (예: http://localhost:3000)'
       
-      # 앱 시작 명령어
       app_start_command:
         required: true
         type: string
         description: '앱 시작 명령어'
       
-      # 앱 실행 포트
       app_port:
         required: false
         type: string
@@ -48,7 +39,7 @@ jobs:
   # ---------------------------------------------------------------------------
   check-topic:
     name: Check Topic or Force Run
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
     
@@ -90,7 +81,7 @@ jobs:
     name: Run ZAP Baseline Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 30
     
     steps:
@@ -107,10 +98,9 @@ jobs:
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
           
-          # 앱이 준비될 때까지 대기 (최대 60초)
+          # 앱이 준비될 때까지 대기
           echo "⏳ Waiting for app to be ready..."
           for i in {1..30}; do
-            # /health 또는 / 경로로 헬스체크
             if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
                curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
               echo "✅ App is ready!"
@@ -146,7 +136,7 @@ jobs:
           echo "✅ Scan completed"
         continue-on-error: true
       
-      # 리포트 업로드 (Artifacts)
+      # 리포트 업로드
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
@@ -183,19 +173,12 @@ jobs:
 
 # =============================================================================
 # 참고사항:
-# 
 # 리포트 다운로드:
 #   Actions → 실행 클릭 → Artifacts → zap-baseline-report 다운로드
 # 
 # 검사 항목:
 #   - 보안 헤더 누락 (CSP, X-Frame-Options 등)
-#   - Cookie 설정 오류 (Secure, HttpOnly 플래그)
-#   - 정보 노출 (에러 메시지, 버전 정보)
+#   - Cookie 설정 오류
+#   - 정보 노출
 #   - 취약한 SSL/TLS 설정
-# 
-# 프로젝트별 시작 명령어 예시:
-#   Node.js:  'npm install && npm start'
-#   React:    'npm install && npm run build && npx serve -s build -l 3000'
-#   Python:   'pip install -r requirements.txt && python app.py'
-#   Django:   'pip install -r requirements.txt && python manage.py runserver'
 # =============================================================================
