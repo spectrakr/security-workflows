@@ -1,6 +1,5 @@
 # .github/workflows/trivy-scan.yml
 # 중앙 Trivy 보안 스캔 워크플로우
-# 서비스 레포지토리의 'secrets: inherit' 설정을 통해 비밀값을 직접 참조합니다.
 
 name: Reusable Trivy Security Scan
 
@@ -15,7 +14,6 @@ on:
         required: false
         type: string
         default: ''
-    # 재사용 워크플로우 호출 시 전달받거나 상속받을 비밀값 정의
     secrets:
       NEXUS_USER:
         required: false
@@ -24,9 +22,10 @@ on:
 
 jobs:
   check-topic:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
+    
     steps:
       - name: Check for auto-trivy topic or force_run
         id: check
@@ -48,22 +47,21 @@ jobs:
   trivy-scan:
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 1. 이미지 주소에서 레지스트리 도메인 추출 (익스프레션 오류 해결용)
+      # 1. 이미지 주소에서 레지스트리 도메인 추출
       - name: Extract Registry Host
         if: inputs.image_ref != ''
         id: get_reg
         run: |
-          # 슬래시(/)를 기준으로 첫 번째 파트를 추출 (예: registry-nexus.spectra.co.kr)
           DOMAIN=$(echo "${{ inputs.image_ref }}" | cut -d'/' -f1)
           echo "host=$DOMAIN" >> $GITHUB_OUTPUT
 
       # 2. 사내 Nexus 레지스트리 로그인
-      # 💡 'secrets' 키워드가 if 조건문에서 에러를 유발하므로 inputs.image_ref 여부만 체크합니다.
       - name: Login to Nexus Registry
         if: inputs.image_ref != ''
         uses: docker/login-action@v3
@@ -72,7 +70,7 @@ jobs:
           username: ${{ secrets.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASSWORD }}
 
-      # 3. 파일 시스템 스캔 (의존성 라이브러리)
+      # 3. 파일 시스템 스캔
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -82,15 +80,13 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-      # 4. 이미지 스캔 (원격 또는 로컬 빌드)
+      # 4. 이미지 스캔
       - name: Run Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         env:
-          # Trivy 스캔 시 인증이 필요한 경우 상속받은 비밀값 사용
           TRIVY_USERNAME: ${{ secrets.NEXUS_USER }}
           TRIVY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         with:
-          # image_ref가 있으면 원격 스캔, 없으면 Dockerfile 존재 시 로컬 빌드 스캔
           image-ref: ${{ inputs.image_ref != '' && inputs.image_ref || (hashFiles('Dockerfile') != '' && format('local-image:{0}', github.sha) || '') }}
           scan-type: 'image'
           format: 'json'
@@ -98,7 +94,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
         if: inputs.image_ref != '' || hashFiles('Dockerfile') != ''
 
-      # 5. 결과 리포트 생성 및 통합
+      # 5. 결과 리포트 생성
       - name: Generate HTML Reports
         if: always()
         run: |
@@ -113,7 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-security-report
+          name: trivy-security-report-${{ github.run_number }}
           path: |
             trivy-*.json
             trivy-*.html
