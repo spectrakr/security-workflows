@@ -8,14 +8,6 @@
 # ⚠️ 경고:
 #   - 실제 공격을 수행합니다 (SQL Injection, XSS 등)
 #   - 절대 프로덕션 환경에서 실행 금지!
-#   - 테스트 환경에서만 사용
-#   - 테스트 데이터만 있어야 함
-# 
-# 활성화 방법 (자동):
-#   gh repo edit YOUR-ORG/YOUR-REPO --add-topic auto-zap-full
-# 
-# 수동 실행 권장:
-#   security.yml의 workflow_dispatch로 force_run: true 전달
 # =============================================================================
 
 name: Reusable ZAP Full Scan
@@ -29,26 +21,22 @@ on:
         default: false
         description: '토픽 없이 강제 실행'
       
-      # 스캔 대상 URL (⚠️ 테스트 환경만!)
       target_url:
         required: true
         type: string
         description: '⚠️ 테스트 환경 URL만 입력!'
       
-      # 앱 시작 명령어
       app_start_command:
         required: true
         type: string
         description: '앱 시작 명령어'
       
-      # 앱 실행 포트
       app_port:
         required: false
         type: string
         default: '3000'
         description: '앱 포트'
       
-      # 스캔 타임아웃 (분)
       scan_timeout:
         required: false
         type: string
@@ -61,7 +49,7 @@ jobs:
   # ---------------------------------------------------------------------------
   check-topic:
     name: Check Topic or Force Run
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
     
@@ -105,7 +93,7 @@ jobs:
     name: Run ZAP Full Scan (⚠️ Active Attacks)
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     timeout-minutes: 90
     
     steps:
@@ -198,29 +186,8 @@ jobs:
 
 # =============================================================================
 # 중요 사항:
-# 
 # ⚠️ 주의:
 #   - 절대 프로덕션 금지!
 #   - 테스트 데이터만 있어야 함
 #   - 주 1회 또는 월 1회 권장
-#   - 수동 실행 권장 (자동 실행 비권장)
-# 
-# False Positive 처리:
-#   저장소에 .zap/rules.tsv 파일 생성:
-#   
-#   10040  IGNORE  프레임워크가 자동 처리
-#   10021  WARN    다음 스프린트에 수정 예정
-# 
-# 타임아웃 조정:
-#   - 작은 앱: 30분
-#   - 중간 앱: 60분 (기본값)
-#   - 큰 앱: 90-120분
-# 
-# 검사 항목:
-#   - SQL Injection
-#   - Cross-Site Scripting (XSS)
-#   - Path Traversal
-#   - CSRF
-#   - XXE
-#   - SSRF
 # =============================================================================
