@@ -3,7 +3,7 @@
 # =============================================================================
 # 목적: REST/GraphQL API 전용 보안 스캔
 # 소요시간: 10-15분
-# 
+#
 # 특징:
 #   - OpenAPI/Swagger 스펙 지원
 #   - API 엔드포인트 자동 탐지
@@ -19,29 +19,29 @@ on:
         type: boolean
         default: false
         description: '토픽 없이 강제 실행'
-      
+
       target_url:
         required: true
         type: string
         description: 'API Base URL (예: http://localhost:8080/api)'
-      
+
       app_start_command:
         required: true
         type: string
         description: '앱 시작 명령어'
-      
+
       app_port:
         required: false
         type: string
         default: '3000'
         description: '앱 포트'
-      
+
       api_spec_url:
         required: false
         type: string
         default: ''
         description: 'OpenAPI/Swagger 스펙 URL (선택, 권장)'
-      
+
       api_format:
         required: false
         type: string
@@ -49,104 +49,76 @@ on:
         description: 'API 형식 (openapi, graphql)'
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job 1: 토픽 확인 또는 강제 실행
-  # ---------------------------------------------------------------------------
   check-topic:
     name: Check Topic or Force Run
     runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
-    
+
     steps:
       - name: Check for auto-zap-api topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
-            // force_run이 true면 무조건 실행
             if (${{ inputs.force_run }}) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP API scan enabled (force_run = true)');
-              console.log('💡 Running without topic check');
               return;
             }
-            
-            // 토픽 확인
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
             });
-            
             const topics = repo.data.topics || [];
-            
             if (topics.includes('auto-zap-api')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP API scan enabled (auto-zap-api topic found)');
+              console.log('ZAP API scan enabled (auto-zap-api topic found)');
             } else {
               core.setOutput('enabled', 'false');
-              console.log('⏭️ ZAP API scan disabled (no auto-zap-api topic)');
-              console.log('💡 Tip: Add topic with "gh repo edit --add-topic auto-zap-api"');
+              console.log('ZAP API scan disabled (no auto-zap-api topic)');
+              console.log('Tip: gh repo edit --add-topic auto-zap-api');
             }
 
-  # ---------------------------------------------------------------------------
-  # Job 2: ZAP API 스캔 실행
-  # ---------------------------------------------------------------------------
   zap-api:
     name: Run ZAP API Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: self-hosted
     timeout-minutes: 60
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
+
       # 애플리케이션 시작
       - name: Start application
         run: |
-          echo "🚀 Starting application..."
-          
+          echo "Starting application..."
           ${{ inputs.app_start_command }} &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
-          
-          echo "⏳ Waiting for app..."
+
           for i in {1..30}; do
             if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
                curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-              echo "✅ App ready!"
+              echo "App ready!"
               break
             fi
             sleep 2
           done
-      
-      # API 스펙 확인 (있는 경우)
-      - name: Check API spec
-        if: inputs.api_spec_url != ''
-        run: |
-          echo "📄 Checking API spec at ${{ inputs.api_spec_url }}"
-          curl -f ${{ inputs.api_spec_url }} > api-spec.json || \
-          curl -f ${{ inputs.api_spec_url }} > api-spec.yaml || \
-          echo "⚠️ Could not download API spec, will proceed without it"
-      
+
       # ZAP Docker 이미지 다운로드
       - name: Pull ZAP Docker image
         run: docker pull ghcr.io/zaproxy/zaproxy:stable
-      
-      # ZAP API 스캔 실행 (스펙 있을 때)
+
+      # ZAP API 스캔 실행 - 스펙 있을 때 (HTML만 생성)
       - name: Run ZAP API Scan (with spec)
         if: inputs.api_spec_url != ''
         run: |
-          echo "🔍 Running ZAP API Scan with spec..."
+          echo "Running ZAP API Scan with spec..."
           echo "Target: ${{ inputs.target_url }}"
           echo "Spec: ${{ inputs.api_spec_url }}"
-          
-          # API 스펙 다운로드
-          curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.json 2>/dev/null || \
-          curl -f ${{ inputs.api_spec_url }} -o /tmp/api-spec.yaml 2>/dev/null || true
-          
+
           docker run --rm \
             --user root \
             --network host \
@@ -156,46 +128,40 @@ jobs:
             zap-api-scan.py \
             -t ${{ inputs.target_url }} \
             -f ${{ inputs.api_format }} \
-            -r report_html.html \
-            -w report_md.md \
-            -J report_json.json || true
-          
-          echo "✅ Scan completed"
+            -r report_html.html || true
+
+          echo "Scan completed"
         continue-on-error: true
-      
-      # ZAP API 스캔 실행 (스펙 없을 때)
+
+      # ZAP API 스캔 실행 - 스펙 없을 때 (HTML만 생성)
       - name: Run ZAP API Scan (without spec)
         if: inputs.api_spec_url == ''
         run: |
-          echo "🔍 Running ZAP API Scan without spec..."
-          echo "⚠️ Note: Without API spec, some endpoints may be missed"
+          echo "Running ZAP API Scan without spec..."
+          echo "Note: Without API spec, some endpoints may be missed"
           echo "Target: ${{ inputs.target_url }}"
-          
+
           docker run --rm \
             --network host \
             -v ${{ github.workspace }}:/zap/wrk:rw \
             -t ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
             -t ${{ inputs.target_url }} \
-            -r report_html.html \
-            -w report_md.md \
-            -J report_json.json || true
-          
-          echo "✅ Scan completed"
+            -r report_html.html || true
+
+          echo "Scan completed"
         continue-on-error: true
-      
-      # 리포트 업로드
+
+      # HTML 리포트만 업로드 (3일 보관)
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zap-api-report-${{ github.run_number }}
-          path: |
-            report_html.html
-            report_md.md
-            report_json.json
-          retention-days: 7
-      
+          path: report_html.html
+          retention-days: 3
+          compression-level: 6
+
       # 애플리케이션 종료
       - name: Stop application
         if: always()
@@ -203,28 +169,3 @@ jobs:
           if [ ! -z "${{ env.APP_PID }}" ]; then
             kill ${{ env.APP_PID }} 2>/dev/null || true
           fi
-      
-      # 스캔 요약
-      - name: Summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "ZAP API Scan Summary"
-          echo "=========================================="
-          echo "Target: ${{ inputs.target_url }}"
-          if [ ! -z "${{ inputs.api_spec_url }}" ]; then
-            echo "API Spec: ${{ inputs.api_spec_url }}"
-          else
-            echo "API Spec: Not provided"
-          fi
-          echo "Format: ${{ inputs.api_format }}"
-          echo "=========================================="
-          echo ""
-          echo "📊 Download report: Actions → Artifacts"
-
-# =============================================================================
-# 사용 팁:
-# OpenAPI/Swagger 스펙 제공 권장:
-#   - 더 정확한 스캔
-#   - 모든 엔드포인트 자동 발견
-# =============================================================================
