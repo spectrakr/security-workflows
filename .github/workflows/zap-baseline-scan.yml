@@ -16,17 +16,17 @@ on:
         type: boolean
         default: false
         description: '토픽 없이 강제 실행'
-      
+
       target_url:
         required: true
         type: string
         description: '스캔할 URL (예: http://localhost:3000)'
-      
+
       app_start_command:
         required: true
         type: string
         description: '앱 시작 명령어'
-      
+
       app_port:
         required: false
         type: string
@@ -34,94 +34,76 @@ on:
         description: '앱 포트'
 
 jobs:
-  # ---------------------------------------------------------------------------
-  # Job 1: 토픽 확인 또는 강제 실행
-  # ---------------------------------------------------------------------------
   check-topic:
     name: Check Topic or Force Run
     runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
-    
+
     steps:
       - name: Check for auto-zap-baseline topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
-            // force_run이 true면 무조건 실행
             if (${{ inputs.force_run }}) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP Baseline scan enabled (force_run = true)');
-              console.log('💡 Running without topic check');
               return;
             }
-            
-            // 토픽 확인
             const repo = await github.rest.repos.get({
               owner: context.repo.owner,
               repo: context.repo.repo
             });
-            
             const topics = repo.data.topics || [];
-            
             if (topics.includes('auto-zap-baseline')) {
               core.setOutput('enabled', 'true');
-              console.log('✅ ZAP Baseline scan enabled (auto-zap-baseline topic found)');
+              console.log('ZAP Baseline scan enabled (auto-zap-baseline topic found)');
             } else {
               core.setOutput('enabled', 'false');
-              console.log('⏭️ ZAP Baseline scan disabled (no auto-zap-baseline topic)');
-              console.log('💡 Tip: Add topic with "gh repo edit --add-topic auto-zap-baseline"');
+              console.log('ZAP Baseline scan disabled (no auto-zap-baseline topic)');
+              console.log('Tip: gh repo edit --add-topic auto-zap-baseline');
             }
 
-  # ---------------------------------------------------------------------------
-  # Job 2: ZAP Baseline 스캔 실행
-  # ---------------------------------------------------------------------------
   zap-baseline:
     name: Run ZAP Baseline Scan
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: self-hosted
     timeout-minutes: 30
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-      
+
       # 애플리케이션 시작 및 준비 대기
       - name: Start application
         run: |
-          echo "🚀 Starting application..."
-          
-          # 백그라운드로 앱 시작
+          echo "Starting application..."
           ${{ inputs.app_start_command }} &
           APP_PID=$!
           echo "APP_PID=$APP_PID" >> $GITHUB_ENV
-          
-          # 앱이 준비될 때까지 대기
-          echo "⏳ Waiting for app to be ready..."
+
+          echo "Waiting for app to be ready..."
           for i in {1..30}; do
             if curl -s http://localhost:${{ inputs.app_port }}/health > /dev/null 2>&1 || \
                curl -s http://localhost:${{ inputs.app_port }} > /dev/null 2>&1; then
-              echo "✅ App is ready!"
+              echo "App is ready!"
               break
             fi
             echo "Waiting... ($i/30)"
             sleep 2
           done
-      
+
       # ZAP Docker 이미지 다운로드
       - name: Pull ZAP Docker image
-        run: |
-          echo "📦 Pulling ZAP Docker image..."
-          docker pull ghcr.io/zaproxy/zaproxy:stable
-      
-      # ZAP Baseline 스캔 실행
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+
+      # ZAP Baseline 스캔 실행 (HTML만 생성)
       - name: Run ZAP Baseline Scan
         run: |
-          echo "🔍 Running ZAP Baseline Scan..."
+          echo "Running ZAP Baseline Scan..."
           echo "Target: ${{ inputs.target_url }}"
-          
+
           docker run --rm \
             --user root \
             --network host \
@@ -129,56 +111,25 @@ jobs:
             -t ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
             -t ${{ inputs.target_url }} \
-            -r report_html.html \
-            -w report_md.md \
-            -J report_json.json || true
-          
-          echo "✅ Scan completed"
+            -r report_html.html || true
+
+          echo "Scan completed"
         continue-on-error: true
-      
-      # 리포트 업로드
+
+      # HTML 리포트만 업로드 (3일 보관)
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: zap-baseline-report-${{ github.run_number }}
-          path: |
-            report_html.html
-            report_md.md
-            report_json.json
-          retention-days: 7
-      
+          path: report_html.html
+          retention-days: 3
+          compression-level: 6
+
       # 애플리케이션 종료
       - name: Stop application
         if: always()
         run: |
           if [ ! -z "${{ env.APP_PID }}" ]; then
             kill ${{ env.APP_PID }} 2>/dev/null || true
-            echo "✅ Application stopped"
           fi
-      
-      # 스캔 요약
-      - name: Summary
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "ZAP Baseline Scan Summary"
-          echo "=========================================="
-          echo "Target: ${{ inputs.target_url }}"
-          echo "Method: Passive scan (safe)"
-          echo "Duration: ~5-10 minutes"
-          echo "=========================================="
-          echo ""
-          echo "📊 Download report: Actions → Artifacts"
-
-# =============================================================================
-# 참고사항:
-# 리포트 다운로드:
-#   Actions → 실행 클릭 → Artifacts → zap-baseline-report 다운로드
-# 
-# 검사 항목:
-#   - 보안 헤더 누락 (CSP, X-Frame-Options 등)
-#   - Cookie 설정 오류
-#   - 정보 노출
-#   - 취약한 SSL/TLS 설정
-# =============================================================================
