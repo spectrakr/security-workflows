@@ -25,14 +25,13 @@ jobs:
     runs-on: self-hosted
     outputs:
       enabled: ${{ steps.check.outputs.enabled }}
-    
+
     steps:
       - name: Check for auto-trivy topic or force_run
         id: check
         uses: actions/github-script@v6
         with:
           script: |
-            // force_run이 true거나 원격 이미지 주소가 입력되면 실행
             if (${{ inputs.force_run }} || "${{ inputs.image_ref }}" !== "") {
               core.setOutput('enabled', 'true');
               return;
@@ -48,7 +47,7 @@ jobs:
     needs: check-topic
     if: needs.check-topic.outputs.enabled == 'true'
     runs-on: self-hosted
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -70,7 +69,7 @@ jobs:
           username: ${{ secrets.NEXUS_USER }}
           password: ${{ secrets.NEXUS_PASSWORD }}
 
-      # 3. 파일 시스템 스캔
+      # 3. 파일시스템 스캔 (JSON → HTML 변환용 중간 파일)
       - name: Run Trivy filesystem scan
         uses: aquasecurity/trivy-action@master
         with:
@@ -80,7 +79,7 @@ jobs:
           severity: 'CRITICAL,HIGH'
         continue-on-error: true
 
-      # 4. 이미지 스캔
+      # 4. 이미지 스캔 (JSON → HTML 변환용 중간 파일)
       - name: Run Trivy Image Scan
         uses: aquasecurity/trivy-action@master
         env:
@@ -93,8 +92,9 @@ jobs:
           output: 'trivy-image-results.json'
           severity: 'CRITICAL,HIGH'
         if: inputs.image_ref != '' || hashFiles('Dockerfile') != ''
+        continue-on-error: true
 
-      # 5. 결과 리포트 생성
+      # 5. JSON → HTML 변환 (업로드용)
       - name: Generate HTML Reports
         if: always()
         run: |
@@ -105,12 +105,13 @@ jobs:
               --output "/work/${f%.json}.html" "/work/$f"
           done
 
-      - name: Upload Artifacts
+      # 6. HTML 리포트만 업로드 (3일 보관)
+      - name: Upload Vulnerability Reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: trivy-security-report-${{ github.run_number }}
           path: |
-            trivy-*.json
             trivy-*.html
-          retention-days: 7
+          retention-days: 3
+          compression-level: 6
