@@ -1,0 +1,154 @@
+# spectrakr/security-workflows/.github/workflows/sbom-scan.yml
+# SBOM(Software Bill of Materials) 생성 워크플로우 (Reusable)
+#
+# 목적: 납품/감사 대응용 소프트웨어 구성 요소 명세서 생성
+# 실행: security.yml의 workflow_dispatch에서만 호출됨 (Push/PR 시 자동 실행 안 됨)
+# 출력: CycloneDX + SPDX 형식 JSON (국제 표준 2종)
+# 보관: 3일 고정 (납품/감사 목적인 경우 실행 후 즉시 다운로드하여 별도 보관)
+
+name: Reusable SBOM Scan
+
+on:
+  workflow_call:
+    inputs:
+      image_ref:
+        description: '스캔할 Nexus 이미지 경로 (비워두면 파일시스템 스캔)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      NEXUS_USER:
+        required: false
+      NEXUS_PASSWORD:
+        required: false
+
+jobs:
+  sbom-scan:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 1. 실행 대상 확인 로그
+      - name: Print scan target
+        run: |
+          if [ -z "${{ inputs.image_ref }}" ]; then
+            echo "SBOM 대상: 파일시스템 (소스코드 의존성)"
+          else
+            echo "SBOM 대상: 이미지 → ${{ inputs.image_ref }}"
+          fi
+
+      # 2. 이미지 주소에서 레지스트리 도메인 추출
+      - name: Extract Registry Host
+        if: inputs.image_ref != ''
+        id: get_reg
+        run: |
+          DOMAIN=$(echo "${{ inputs.image_ref }}" | cut -d'/' -f1)
+          echo "host=$DOMAIN" >> $GITHUB_OUTPUT
+
+      # 3. 사내 Nexus 레지스트리 로그인
+      - name: Login to Nexus Registry
+        if: inputs.image_ref != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ steps.get_reg.outputs.host }}
+          username: ${{ secrets.NEXUS_USER }}
+          password: ${{ secrets.NEXUS_PASSWORD }}
+
+      # 4. 파일시스템 SBOM 생성 (CycloneDX)
+      - name: Generate Filesystem SBOM - CycloneDX
+        if: inputs.image_ref == ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'cyclonedx'
+          output: 'sbom-fs-cyclonedx.json'
+        continue-on-error: true
+
+      # 5. 파일시스템 SBOM 생성 (SPDX)
+      - name: Generate Filesystem SBOM - SPDX
+        if: inputs.image_ref == ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'spdx-json'
+          output: 'sbom-fs-spdx.json'
+        continue-on-error: true
+
+      # 6. 이미지 SBOM 생성 (CycloneDX)
+      - name: Generate Image SBOM - CycloneDX
+        if: inputs.image_ref != ''
+        uses: aquasecurity/trivy-action@master
+        env:
+          TRIVY_USERNAME: ${{ secrets.NEXUS_USER }}
+          TRIVY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        with:
+          scan-type: 'image'
+          image-ref: ${{ inputs.image_ref }}
+          format: 'cyclonedx'
+          output: 'sbom-image-cyclonedx.json'
+        continue-on-error: true
+
+      # 7. 이미지 SBOM 생성 (SPDX)
+      - name: Generate Image SBOM - SPDX
+        if: inputs.image_ref != ''
+        uses: aquasecurity/trivy-action@master
+        env:
+          TRIVY_USERNAME: ${{ secrets.NEXUS_USER }}
+          TRIVY_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
+        with:
+          scan-type: 'image'
+          image-ref: ${{ inputs.image_ref }}
+          format: 'spdx-json'
+          output: 'sbom-image-spdx.json'
+        continue-on-error: true
+
+      # 8. 아티팩트명 생성 (파일시스템 / 이미지 구분)
+      - name: Set artifact name
+        id: artifact_name
+        run: |
+          if [ -z "${{ inputs.image_ref }}" ]; then
+            echo "name=sbom-fs-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          else
+            # 이미지 경로에서 특수문자 제거하여 아티팩트명 생성
+            # 예) registry-nexus.spectra.co.kr/myrepo/frontend:latest → myrepo-frontend-latest
+            IMAGE_SAFE=$(echo "${{ inputs.image_ref }}" | sed 's|.*/||' | tr ':' '-' | tr '.' '-')
+            echo "name=sbom-image-${IMAGE_SAFE}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+          fi
+
+      # 9. SBOM JSON 아티팩트 업로드 (3일 보관)
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.artifact_name.outputs.name }}
+          path: |
+            sbom-*.json
+          retention-days: 3
+          compression-level: 6
+
+# =============================================================================
+# 생성되는 아티팩트:
+#   파일시스템 스캔 시:
+#     sbom-fs-{run_number}
+#       - sbom-fs-cyclonedx.json  : 파일시스템 SBOM (CycloneDX 형식)
+#       - sbom-fs-spdx.json       : 파일시스템 SBOM (SPDX 형식)
+#
+#   이미지 스캔 시 (이미지별 별도 아티팩트):
+#     sbom-image-{이미지명}-{run_number}
+#       - sbom-image-cyclonedx.json : 이미지 SBOM (CycloneDX 형식)
+#       - sbom-image-spdx.json      : 이미지 SBOM (SPDX 형식)
+#
+# SBOM 형식 안내:
+#   - CycloneDX : OWASP 표준. 취약점 정보 포함에 유리. 납품 시 주로 사용.
+#   - SPDX      : Linux Foundation 표준. 라이선스 정보 포함에 유리.
+#   - 두 형식 모두 KISA 및 주요 구축 사이트 제출 가능.
+#
+# 보관 기간: 3일 고정
+#   납품/감사 목적인 경우 실행 후 즉시 다운로드하여 별도 보관하십시오.
+#
+# 이미지 여러 개 스캔 방법:
+#   security.yml의 sbom-scan job matrix.image_ref 항목에 이미지 경로를 추가하면
+#   병렬로 스캔됩니다. 파일시스템 스캔을 위한 빈 문자열('')은 반드시 유지하십시오.
+# =============================================================================
