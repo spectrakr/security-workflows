@@ -7,6 +7,12 @@
 # 특징:
 #   - OpenAPI/Swagger 스펙 지원
 #   - API 엔드포인트 자동 탐지
+#
+# [외부 URL 스캔 방법]
+#   app_start_command 를 비워두면 앱 실행 없이 target_url 을 바로 스캔합니다.
+#   예) target_url:  https://hestia.spectra.co.kr/api
+#       api_spec_url: https://hestia.spectra.co.kr/api-docs/swagger.json
+#       app_start_command: ''   ← 비워두기
 # =============================================================================
 
 name: Reusable ZAP API Scan
@@ -23,18 +29,19 @@ on:
       target_url:
         required: true
         type: string
-        description: 'API Base URL (예: http://localhost:8080/api)'
+        description: 'API Base URL (예: http://localhost:8080/api 또는 https://hestia.spectra.co.kr/api)'
 
       app_start_command:
-        required: true
+        required: false              # ★ 변경: true → false (외부 URL 스캔 시 비워두기)
         type: string
-        description: '앱 시작 명령어'
+        default: ''                  # ★ 추가: 기본값 빈칸
+        description: '앱 시작 명령어 (외부 서버 스캔 시 비워두면 앱 실행 생략)'
 
       app_port:
         required: false
         type: string
         default: '3000'
-        description: '앱 포트'
+        description: '앱 포트 (app_start_command 사용 시에만 의미 있음)'
 
       api_spec_url:
         required: false
@@ -90,8 +97,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # 애플리케이션 시작
+      # ★ 변경: app_start_command 가 있을 때만 앱 실행 (없으면 이 step 건너뜀)
       - name: Start application
+        if: inputs.app_start_command != ''
         run: |
           echo "Starting application..."
           ${{ inputs.app_start_command }} &
@@ -106,6 +114,17 @@ jobs:
             fi
             sleep 2
           done
+
+      # ★ 추가: 외부 URL 스캔 시 대상 확인 로그
+      - name: Verify external target
+        if: inputs.app_start_command == ''
+        run: |
+          echo "외부 URL 스캔 모드 - 앱 실행 생략"
+          echo "Target: ${{ inputs.target_url }}"
+          echo "대상 서버 응답 확인 중..."
+          curl -sk --max-time 10 ${{ inputs.target_url }} > /dev/null \
+            && echo "대상 서버 응답 확인됨" \
+            || echo "경고: 대상 서버 응답 없음 - 스캔을 계속 진행합니다"
 
       # ZAP Docker 이미지 다운로드
       - name: Pull ZAP Docker image
@@ -162,9 +181,9 @@ jobs:
           retention-days: 3
           compression-level: 6
 
-      # 애플리케이션 종료
+      # ★ 변경: app_start_command 가 있을 때만 앱 종료 (없으면 이 step 건너뜀)
       - name: Stop application
-        if: always()
+        if: always() && inputs.app_start_command != ''
         run: |
           if [ ! -z "${{ env.APP_PID }}" ]; then
             kill ${{ env.APP_PID }} 2>/dev/null || true
