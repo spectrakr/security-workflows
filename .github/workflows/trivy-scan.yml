@@ -32,7 +32,7 @@ jobs:
         uses: actions/github-script@v6
         with:
           script: |
-            if (${{ inputs.force_run }} || "${{ inputs.image_ref }}" !== "") {
+            if (${{ inputs.force_run }}) {
               core.setOutput('enabled', 'true');
               return;
             }
