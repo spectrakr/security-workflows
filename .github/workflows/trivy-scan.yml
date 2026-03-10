@@ -110,7 +110,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-security-report-${{ github.run_number }}
+          name: trivy-security-report-${{ github.run_number }}-${{ strategy.job-index }}
           path: |
             trivy-*.html
           retention-days: 3
