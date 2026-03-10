@@ -14,6 +14,10 @@ on:
         required: false
         type: string
         default: ''
+      artifact_suffix:       # ← 추가
+        required: false
+        type: string
+        default: '0'
     secrets:
       NEXUS_USER:
         required: false
@@ -110,7 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-security-report-${{ github.run_number }}-${{ strategy.job-index }}
+          name: trivy-security-report-${{ github.run_number }}-${{ inputs.artifact_suffix }}
           path: |
             trivy-*.html
           retention-days: 3
