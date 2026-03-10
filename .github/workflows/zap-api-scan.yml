@@ -55,6 +55,12 @@ on:
         default: 'openapi'
         description: 'API 형식 (openapi, graphql)'
 
+      artifact_suffix:        # ← 추가
+        required: false
+        type: string
+        default: '0'
+        description: 'Artifact 이름 중복 방지용 suffix'
+
 jobs:
   check-topic:
     name: Check Topic or Force Run
@@ -176,7 +182,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zap-api-report-${{ github.run_number }}-${{ strategy.job-index }}
+          name: zap-api-report-${{ github.run_number }}-${{ inputs.artifact_suffix }}
           path: report_html.html
           retention-days: 3
           compression-level: 6
