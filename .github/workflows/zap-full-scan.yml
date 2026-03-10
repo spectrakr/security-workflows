@@ -149,7 +149,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: zap-full-report-${{ github.run_number }}
+          name: zap-full-report-${{ github.run_number }}-${{ strategy.job-index }}
           path: report_html.html
           retention-days: 3
           compression-level: 6
